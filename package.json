@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "antd": "^6.6.5",
+    "ffmpeg-static": "^5.3.0",
     "hls.js": "^1.7.3",
+    "p-limit": "^7.3.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -26,10 +28,34 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.2",
-    "ffmpeg-static": "^5.3.0",
-    "p-limit": "^7.3.3",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vitest": "^4.1.11"
+  },
+  "build": {
+    "appId": "com.fastcut.app",
+    "productName": "FastCut",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "node_modules/ffmpeg-static/**/*",
+      "node_modules/p-limit/**/*",
+      "node_modules/yocto-queue/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/ffmpeg"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "notarize": false
+    }
   }
 }
