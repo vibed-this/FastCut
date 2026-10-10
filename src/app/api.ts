@@ -1,125 +1,93 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  AppConfig,
+  Definition,
+  DownloadDonePayload,
+  DownloadProgressPayload,
+  DownloadVideoOpts,
+  FileStatus,
+  IpcChannel,
+  IpcParams,
+  IpcResult,
+  ListShareResult,
+  PickPreviewResult,
+  SavedShare,
+  SetConfigInput,
+  ShareMeta,
+  StatusQueryResult,
+  UnlistenFn,
+  VideoPreview,
+} from "../../electron/shared/contract";
 
-// ---- 基础类型（字段 snake_case 与 Rust 完全一致，原样透传） ----
+// 类型统一由 IPC 契约表提供，语义与旧 Tauri 版一致（字段 snake_case 原样透传）。
+export type {
+  AppConfig,
+  Definition,
+  DownloadDonePayload,
+  DownloadProgressPayload,
+  DownloadVideoOpts,
+  FileState,
+  FileStatus,
+  ListShareResult,
+  PickPreviewResult,
+  PreviewTemplate,
+  SavedShare,
+  SetConfigInput,
+  ShareItem,
+  ShareItemType,
+  ShareMeta,
+  StatusQueryResult,
+  UnlistenFn,
+  VideoPreview,
+} from "../../electron/shared/contract";
 
-export type Definition = "AUTO" | "HD" | "SD";
+// ---- 传输层：经 preload 桥 window.fastcut 调用 main（Wave 3 接线） ----
 
-export interface SavedShare {
-  share_id: string;
-  url: string;
-  name: string;
-  pwd: string;
-  added_at: string;
+function invoke<C extends IpcChannel>(channel: C, args?: IpcParams[C]): Promise<IpcResult[C]> {
+  const bridge = window.fastcut;
+  if (bridge === undefined || typeof bridge.invoke !== "function") {
+    throw new Error(`fastcut bridge unavailable, cannot invoke "${channel}" (Wave 3)`);
+  }
+  return bridge.invoke(channel, args);
 }
 
-export interface ShareMeta {
-  name: string;
-}
-
-export type ShareItemType = "file" | "folder";
-
-export interface ShareItem {
-  file_id: string;
-  drive_id: string;
-  name: string;
-  type: ShareItemType;
-  size?: number;
-  category?: string;
-  file_extension?: string;
-}
-
-export interface ListShareResult {
-  items: ShareItem[];
-  next_marker: string;
-}
-
-export type FileState = "saved" | "downloading" | "none";
-
-export interface FileStatus {
-  file_id: string;
-  state: FileState;
-  path?: string;
-}
-
-/** 后端返回的数组 + 按 file_id 索引的映射，一次返回同时满足两种消费方式。 */
-export type StatusQueryResult = FileStatus[] & Record<string, FileStatus>;
-
-export interface VideoPreview {
-  template_id: string;
-  template_name?: string;
-  template_width?: number;
-  template_height?: number;
-  status?: string;
-  preview_url?: string;
-}
-
-/** UI 侧别名：与 VideoPreview 同构。 */
-export type PreviewTemplate = VideoPreview;
-
-/** pick_preview_url 的返回：播放地址 + 实际命中的档（与 Rust PickPreviewResult 对应）。 */
-export interface PickPreviewResult {
-  url: string;
-  template: string;
-}
-
-export interface AppConfig {
-  target_dir?: string;
-  definition: Definition;
-}
-
-/**
- * set_config 入参：兼容 UI 侧的 `materialDir` 写法，
- * 运行时统一翻译为后端的 `target_dir`。
- */
-export interface SetConfigInput {
-  target_dir?: string;
-  materialDir?: string | null;
-  definition?: string;
-}
-
-export interface DownloadVideoOpts {
-  share_id: string;
-  file_id: string;
-  file_name: string;
-  m3u8_url: string;
-  template: string;
-  sub_dir: string;
-}
-
-export interface DownloadProgressPayload {
-  file_id: string;
-  done: number;
-  total: number;
-}
-
-export interface DownloadDonePayload {
-  file_id: string;
-  ok: boolean;
-  path?: string;
-  error?: string;
+function listen<K extends "download-progress" | "download-done">(
+  event: K,
+  handler: (
+    payload: K extends "download-progress" ? DownloadProgressPayload : DownloadDonePayload,
+  ) => void,
+): Promise<UnlistenFn> {
+  const bridge = window.fastcut;
+  if (bridge === undefined) {
+    throw new Error(`fastcut bridge unavailable, cannot listen "${event}" (Wave 3)`);
+  }
+  if (event === "download-progress") {
+    const off = bridge.onDownloadProgress(handler as (payload: DownloadProgressPayload) => void);
+    return Promise.resolve(off);
+  }
+  const off = bridge.onDownloadDone(handler as (payload: DownloadDonePayload) => void);
+  return Promise.resolve(off);
 }
 
 // ---- 命令封装 ----
 
 export function listShares(): Promise<SavedShare[]> {
-  return invoke<SavedShare[]>("list_shares");
+  return invoke("list_shares", {});
 }
 
 export function addShare(url: string, pwd?: string): Promise<SavedShare> {
-  return invoke<SavedShare>("add_share", { url, pwd });
+  return invoke("add_share", { url, pwd });
 }
 
 export function renameShare(share_id: string, name: string): Promise<void> {
-  return invoke<void>("rename_share", { shareId: share_id, name });
+  return invoke("rename_share", { shareId: share_id, name });
 }
 
 export function removeShare(share_id: string): Promise<void> {
-  return invoke<void>("remove_share", { shareId: share_id });
+  return invoke("remove_share", { shareId: share_id });
 }
 
 export function getShareMeta(share_id: string, pwd?: string): Promise<ShareMeta> {
-  return invoke<ShareMeta>("get_share_meta", { shareId: share_id, pwd });
+  return invoke("get_share_meta", { shareId: share_id, pwd });
 }
 
 export function listShare(
@@ -129,7 +97,7 @@ export function listShare(
   limit?: number,
   pwd?: string,
 ): Promise<ListShareResult> {
-  return invoke<ListShareResult>("list_share", {
+  return invoke("list_share", {
     shareId: share_id,
     parentFileId: parent_file_id,
     marker,
@@ -142,7 +110,7 @@ export async function getStatusBatch(
   share_id: string,
   file_ids: string[],
 ): Promise<StatusQueryResult> {
-  const arr = await invoke<FileStatus[]>("get_status_batch", {
+  const arr = await invoke("get_status_batch", {
     shareId: share_id,
     fileIds: file_ids,
   });
@@ -159,7 +127,7 @@ export function videoPreview(
   file_id: string,
   pwd?: string,
 ): Promise<VideoPreview[]> {
-  return invoke<VideoPreview[]>("video_preview", {
+  return invoke("video_preview", {
     shareId: share_id,
     driveId: drive_id,
     fileId: file_id,
@@ -174,7 +142,7 @@ export function pickPreviewUrl(
   definition: Definition,
   pwd?: string,
 ): Promise<PickPreviewResult> {
-  return invoke<PickPreviewResult>("pick_preview_url", {
+  return invoke("pick_preview_url", {
     shareId: share_id,
     driveId: drive_id,
     fileId: file_id,
@@ -202,7 +170,7 @@ export function downloadVideo(
 ): Promise<string> {
   if (typeof m3u8_url_or_opts === "object") {
     const o = m3u8_url_or_opts;
-    return invoke<string>("download_video", {
+    return invoke("download_video", {
       m3u8Url: o.m3u8_url,
       shareId: o.share_id,
       fileId: o.file_id,
@@ -211,18 +179,18 @@ export function downloadVideo(
       subDir: o.sub_dir,
     });
   }
-  return invoke<string>("download_video", {
+  return invoke("download_video", {
     m3u8Url: m3u8_url_or_opts,
-    shareId: share_id,
-    fileId: file_id,
-    fileName: file_name,
-    template,
-    subDir: sub_dir,
+    shareId: share_id ?? "",
+    fileId: file_id ?? "",
+    fileName: file_name ?? "",
+    template: template ?? "",
+    subDir: sub_dir ?? "",
   });
 }
 
 export function getConfig(): Promise<AppConfig> {
-  return invoke<AppConfig>("get_config");
+  return invoke("get_config", {});
 }
 
 export function setConfig(config: SetConfigInput): Promise<void> {
@@ -234,11 +202,15 @@ export function setConfig(config: SetConfigInput): Promise<void> {
     inner.target_dir = config.materialDir;
   }
   if (config.definition !== undefined) inner.definition = config.definition;
-  return invoke<void>("set_config", { config: inner });
+  return invoke("set_config", { config: inner });
 }
 
 export function pickFolder(): Promise<string | null> {
-  return invoke<string | null>("pick_folder");
+  return invoke("pick_folder", {});
+}
+
+export function getStatus(share_id: string, file_id: string): Promise<FileStatus> {
+  return invoke("get_status", { shareId: share_id, fileId: file_id });
 }
 
 // ---- 事件订阅（主契约：返回 Promise<UnlistenFn>）----
@@ -246,28 +218,20 @@ export function pickFolder(): Promise<string | null> {
 export function onDownloadProgress(
   handler: (payload: DownloadProgressPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<DownloadProgressPayload>("download-progress", (event) => {
-    handler(event.payload);
-  });
+  return listen("download-progress", handler);
 }
 
 export function onDownloadDone(
   handler: (payload: DownloadDonePayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<DownloadDonePayload>("download-done", (event) => {
-    handler(event.payload);
-  });
+  return listen("download-done", handler);
 }
 
 // ---- 事件订阅（UI 侧同步别名：返回同步 unlisten 函数）----
 
-export function onProgress(
-  handler: (payload: DownloadProgressPayload) => void,
-): () => void {
+export function onProgress(handler: (payload: DownloadProgressPayload) => void): () => void {
   let off: UnlistenFn | undefined;
-  void listen<DownloadProgressPayload>("download-progress", (event) => {
-    handler(event.payload);
-  })
+  void listen("download-progress", handler)
     .then((fn) => {
       off = fn;
     })
@@ -277,13 +241,9 @@ export function onProgress(
   };
 }
 
-export function onDone(
-  handler: (payload: DownloadDonePayload) => void,
-): () => void {
+export function onDone(handler: (payload: DownloadDonePayload) => void): () => void {
   let off: UnlistenFn | undefined;
-  void listen<DownloadDonePayload>("download-done", (event) => {
-    handler(event.payload);
-  })
+  void listen("download-done", handler)
     .then((fn) => {
       off = fn;
     })
