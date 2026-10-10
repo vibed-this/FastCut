@@ -13,13 +13,13 @@
 /** 清晰度档位。 */
 export type Definition = "AUTO" | "HD" | "SD";
 
-/** 已保存的分享链接。 */
+/** 已保存的分享链接（与落盘 schema/序列化一致：无 pwd 写 null，added_at 为秒级整数）。 */
 export interface SavedShare {
   share_id: string;
   url: string;
   name: string;
-  pwd: string;
-  added_at: string;
+  pwd: string | null;
+  added_at: number;
 }
 
 /** 分享元信息。 */
@@ -88,6 +88,7 @@ export interface AppConfig {
 /**
  * set_config 入参：兼容 UI 侧的 `materialDir` 写法，
  * 运行时统一翻译为后端的 `target_dir`。
+ * store 侧为合并语义：未传的字段保持原值（见 store.setConfig），非全量覆盖。
  */
 export interface SetConfigInput {
   target_dir?: string;
@@ -176,11 +177,11 @@ export interface IpcParams {
   };
 }
 
-/** 各 channel 的 invoke 返回。 */
+/** 各 channel 的 invoke 返回（rename_share 以旧 Rust `Result<SavedShare>` 为准，返回更新后的分享）。 */
 export interface IpcResult {
   list_shares: SavedShare[];
   add_share: SavedShare;
-  rename_share: void;
+  rename_share: SavedShare;
   remove_share: void;
   get_config: AppConfig;
   set_config: void;

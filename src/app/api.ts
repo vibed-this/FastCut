@@ -78,7 +78,7 @@ export function addShare(url: string, pwd?: string): Promise<SavedShare> {
   return invoke("add_share", { url, pwd });
 }
 
-export function renameShare(share_id: string, name: string): Promise<void> {
+export function renameShare(share_id: string, name: string): Promise<SavedShare> {
   return invoke("rename_share", { shareId: share_id, name });
 }
 

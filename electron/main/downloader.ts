@@ -32,55 +32,18 @@ import type {
   DownloadDonePayload,
   DownloadProgressPayload,
 } from "../shared/contract.js";
+import { sanitizeSegment } from "./share-api.js";
+import { getConfig, ledgerKey, recordLedger } from "./store.js";
 
 // ---------------------------------------------------------------------------
-// 跨模块依赖（Wave 2a/2b 并行创建中）
+// 跨模块依赖（Wave 3 已归一化为静态 import）
 // ---------------------------------------------------------------------------
 //
-// 约定路径 `./share-api.js`（sanitizeSegment）与 `./store.js`
-// （ledgerKey / recordLedger / getConfig）。这些文件落地前，下面的本地实现
-// （与 Rust 源码逐行对应）负责兜底，保证单测与 tsc 可跑通；文件落地后自动委托。
-// 实测 tsc 对缺失模块的动态 import 不报 TS2307，故此处用动态 import + 本地兜底
-// （文件落地、静态 import 可用后，需删掉动态加载改回静态 import）。
-
-/** 与 `share_api.rs::sanitize_segment` 逐行对应：去掉 `/ \ \0` 后 trim，空则"未命名"，截断 100 字符。 */
-function builtinSanitizeSegment(raw: string): string {
-  const cleaned = raw.replace(/[/\\\0]/g, "").trim();
-  if (cleaned === "") return "未命名";
-  return Array.from(cleaned).slice(0, 100).join("");
-}
-
-/** 与 `store.rs::ledger_key` 对应：`{share_id}:{file_id}`。 */
-function builtinLedgerKey(shareId: string, fileId: string): string {
-  return `${shareId}:${fileId}`;
-}
-
-type SanitizeFn = (raw: string) => string;
-type LedgerKeyFn = (shareId: string, fileId: string) => string;
-
-let sanitizeSegmentImpl: SanitizeFn = builtinSanitizeSegment;
-let ledgerKeyImpl: LedgerKeyFn = builtinLedgerKey;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let storeModule: Record<string, any> | null = null;
-
-async function upgradeDeps(): Promise<void> {
-  // 注：./share-api.ts 由 Wave 2a 并行创建；tsc 对缺失模块的动态 import 不报错，缺失时走本地兜底
-  const shareApi = await import("./share-api.js").catch((): null => null);
-  if (shareApi !== null && typeof shareApi.sanitizeSegment === "function") {
-    sanitizeSegmentImpl = shareApi.sanitizeSegment as SanitizeFn;
-  }
-  // 注：./store.ts 由 Wave 2b 并行创建，缺失时走本地兜底
-  const store = await import("./store.js").catch((): null => null);
-  if (store !== null && typeof store === "object") {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    storeModule = store as Record<string, any>;
-    if (typeof store.ledgerKey === "function") {
-      ledgerKeyImpl = store.ledgerKey as LedgerKeyFn;
-    }
-  }
-}
-
-void upgradeDeps();
+// - `sanitizeSegment` 来自 `./share-api.js`，`ledgerKey` / `recordLedger` /
+//   `getConfig` 来自 `./store.js`。
+// - 无循环依赖：store 永不 import downloader（`isDownloading` 经模块级
+//   provider 注入，main 启动时调 `setIsDownloadingProvider` 接线）；
+//   downloader → store 为单向依赖。
 
 // ---------------------------------------------------------------------------
 // 常量 / 状态
@@ -95,7 +58,7 @@ const FFMPEG_MISSING_MSG = "未检测到 ffmpeg，请先安装 ffmpeg 后再下�
 const inFlight = new Set<string>();
 
 export function isDownloading(shareId: string, fileId: string): boolean {
-  return inFlight.has(ledgerKeyImpl(shareId, fileId));
+  return inFlight.has(ledgerKey(shareId, fileId));
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +138,7 @@ export function resolve_target_dir(base: string, subDir: string): string {
   for (const raw of s.split("/")) {
     if (raw.trim() === "") continue;
     if (raw.trim() === "..") throw new Error("子目录不能包含 ..");
-    const seg = sanitizeSegmentImpl(raw);
+    const seg = sanitizeSegment(raw);
     if (seg === "..") throw new Error("子目录不能包含 ..");
     dir = path.join(dir, seg);
   }
@@ -396,8 +359,8 @@ export interface LedgerEntryInput {
  * - 驼峰命名沿用 `contract.ts` 的 invoke 顶层参数风格；
  * - `userDataDir` 供 Wave 2b 的 store 定位配置与账本；
  * - `emit` 由 Wave 3 接到 `webContents.send`；
- * - `recordLedger` 可选注入：默认用 `./store.js` 的实现（落地后自动委托），
- *   显式传入时优先（防循环依赖的逃生口）。
+ * - `recordLedger` 可选注入：默认用 `./store.js` 的 `recordLedger`，
+ *   显式传入时优先（测试与特殊接线的逃生口）。
  */
 export interface DownloadVideoOptions {
   m3u8Url: string;
@@ -417,13 +380,7 @@ export interface DownloadVideoOptions {
 }
 
 async function readTargetDir(userDataDir: string): Promise<string> {
-  // Wave 2b 的 store 落地后自动委托：getConfig(userDataDir) -> { target_dir?: string }。
-  const getConfig = storeModule?.["getConfig"];
-  if (typeof getConfig !== "function") {
-    throw new Error("未配置目标文件夹，请先在设置页选择下载目录");
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const config = (await getConfig(userDataDir)) as any;
+  const config = await getConfig(userDataDir);
   const dirRaw: string = config?.target_dir ?? "";
   if (dirRaw.trim() === "") {
     throw new Error("未配置目标文件夹，请先在设置页选择下载目录");
@@ -435,10 +392,7 @@ async function recordLedgerEntry(
   opts: DownloadVideoOptions,
   entry: LedgerEntryInput,
 ): Promise<void> {
-  const fn = opts.recordLedger ?? storeModule?.["recordLedger"];
-  if (typeof fn !== "function") {
-    throw new Error("记账失败：store 未就绪");
-  }
+  const fn = opts.recordLedger ?? recordLedger;
   try {
     await fn(opts.userDataDir, opts.shareId, opts.fileId, entry);
   } catch (e) {
@@ -457,7 +411,7 @@ async function run_pipeline(opts: DownloadVideoOptions): Promise<string> {
   } catch (e) {
     throw new Error(`目标文件夹创建失败：${errText(e)}`);
   }
-  const safeName = sanitizeSegmentImpl(fileName);
+  const safeName = sanitizeSegment(fileName);
   const outPath = unique_mp4_path(dir, safeName);
 
   let m3u8Bytes: Buffer;
@@ -537,7 +491,7 @@ export async function downloadVideo(opts: DownloadVideoOptions): Promise<string>
   if (opts.m3u8Url.trim() === "") {
     throw new Error("m3u8 链接为空");
   }
-  const key = ledgerKeyImpl(opts.shareId, opts.fileId);
+  const key = ledgerKey(opts.shareId, opts.fileId);
   if (inFlight.has(key)) return "downloading";
   inFlight.add(key);
   try {
