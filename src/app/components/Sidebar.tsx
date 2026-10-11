@@ -1,4 +1,4 @@
-/** 侧边栏：分享列表的展示与管理入口。 */
+/** 侧边栏：合集列表的展示与管理入口。 */
 import { useState } from "react";
 import {
   App as AntdApp,
@@ -8,19 +8,30 @@ import {
   Input,
   List,
   Modal,
+  Radio,
   Typography,
 } from "antd";
-import { DeleteOutlined, EllipsisOutlined, PlusOutlined } from "@ant-design/icons";
-import { addShare, pickFolder, removeShare, renameShare, setConfig } from "../api";
-import type { SavedShare } from "../api";
+import {
+  BookOutlined,
+  CloudOutlined,
+  DeleteOutlined,
+  EllipsisOutlined,
+  PlusOutlined,
+} from "@ant-design/icons";
+import { addCollection, pickFolder, removeCollection, renameCollection, setConfig } from "../api";
+import type { Collection, CollectionKind } from "../api";
 import { useStore } from "../store";
 
-/** 添加分享弹窗内部的表单状态。 */
+/** 新建合集弹窗内部的表单状态。 */
 interface AddFormState {
-  /** 用户输入的分享链接。 */
+  /** 合集类型。 */
+  kind: CollectionKind;
+  /** 云盘分享链接。 */
   url: string;
   /** 可选的提取密码。 */
   pwd: string;
+  /** 小红书合集名。 */
+  name: string;
 }
 
 /** 侧边栏组件属性。 */
@@ -30,7 +41,7 @@ export interface SidebarProps {
 }
 
 /**
- * 分享列表侧边栏。
+ * 合集列表侧边栏。
  *
  * @param props - 组件属性
  * @returns 侧边栏元素
@@ -40,37 +51,53 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
   const { state, dispatch } = useStore();
   const { message, modal } = AntdApp.useApp();
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState<AddFormState>({ url: "", pwd: "" });
+  const [addForm, setAddForm] = useState<AddFormState>({
+    kind: "alipan",
+    url: "",
+    pwd: "",
+    name: "",
+  });
   const [addError, setAddError] = useState("");
   const [addLoading, setAddLoading] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<SavedShare | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Collection | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
 
-  /** 点击条目打开分享（单视图，直接切换）。 */
-  function handleOpen(share: SavedShare): void {
-    if (state.activeShareId === share.share_id) {
+  /** 点击条目打开合集（单视图，直接切换）。 */
+  function handleOpen(collection: Collection): void {
+    if (state.activeCollectionId === collection.collection_id) {
       return;
     }
-    dispatch({ type: "explorer/open", share });
+    dispatch({ type: "explorer/open", collection });
   }
 
-  /** 提交添加分享。 */
+  /** 提交新建合集。 */
   async function handleAddConfirm(): Promise<void> {
-    const url = addForm.url.trim();
-    if (url === "") {
-      setAddError("请输入分享链接");
-      return;
-    }
-    setAddLoading(true);
     setAddError("");
+    setAddLoading(true);
     try {
-      const pwd = addForm.pwd.trim() === "" ? undefined : addForm.pwd.trim();
-      const created = await addShare(url, pwd);
-      dispatch({ type: "shares/set", shares: [...state.shares, created] });
-      dispatch({ type: "explorer/open", share: created });
+      if (addForm.kind === "alipan") {
+        const url = addForm.url.trim();
+        if (url === "") {
+          setAddError("请输入分享链接");
+          return;
+        }
+        const pwd = addForm.pwd.trim() === "" ? undefined : addForm.pwd.trim();
+        const created = await addCollection("alipan", { url, pwd });
+        dispatch({ type: "collections/add", collection: created });
+        dispatch({ type: "explorer/open", collection: created });
+      } else {
+        const name = addForm.name.trim();
+        if (name === "") {
+          setAddError("请输入合集名");
+          return;
+        }
+        const created = await addCollection("xiaohongshu", { name });
+        dispatch({ type: "collections/add", collection: created });
+        dispatch({ type: "explorer/open", collection: created });
+      }
       setAddOpen(false);
-      setAddForm({ url: "", pwd: "" });
+      setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
     } catch (e) {
       // 行内报错，不抛全局
       setAddError(e instanceof Error ? e.message : String(e));
@@ -86,18 +113,40 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
     const name = renameName.trim();
     if (name === "") {
-      void message.warning("请输入新的分享名称");
+      void message.warning("请输入新的合集名称");
       return;
     }
     setRenameLoading(true);
     try {
-      await renameShare(renameTarget.share_id, name);
+      const renamed = await renameCollection(renameTarget.collection_id, name);
       dispatch({
-        type: "shares/set",
-        shares: state.shares.map((s) =>
-          s.share_id === renameTarget.share_id ? { ...s, name } : s,
-        ),
+        type: "collections/rename",
+        collection_id: renameTarget.collection_id,
+        name,
       });
+      // 小红书重命名会重命名磁盘文件夹（relDir 变化）：若正打开该合集，同步刷新整条栈路径。
+      if (
+        renamed.kind === "xiaohongshu" &&
+        state.explorer !== null &&
+        state.explorer.collection_id === renameTarget.collection_id &&
+        renamed.relDir !== undefined &&
+        renamed.relDir !== ""
+      ) {
+        const stack = state.explorer.stack;
+        const oldRoot = stack[0]?.file_id ?? "";
+        if (oldRoot !== "" && oldRoot !== renamed.relDir) {
+          dispatch({
+            type: "explorer/navigate",
+            stack: stack.map((s) =>
+              s.file_id === oldRoot
+                ? { ...s, file_id: renamed.relDir as string }
+                : s.file_id.startsWith(`${oldRoot}/`)
+                  ? { ...s, file_id: `${renamed.relDir as string}${s.file_id.slice(oldRoot.length)}` }
+                  : s,
+            ),
+          });
+        }
+      }
       setRenameTarget(null);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
@@ -106,31 +155,28 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
   }
 
-  /** 确认删除分享（收纳在更多菜单内，二次确认）。 */
-  function confirmRemove(share: SavedShare): void {
+  /** 确认删除合集（收纳在更多菜单内，二次确认）。 */
+  function confirmRemove(collection: Collection): void {
+    const isXhs = collection.kind === "xiaohongshu";
     modal.confirm({
-      title: "确定删除该分享吗？",
+      title: isXhs ? "确定删除该合集吗？将连带删除磁盘文件夹" : "确定删除该合集吗？",
       okText: "删除",
       okType: "danger",
       cancelText: "取消",
       onOk: () => {
-        void handleRemove(share);
+        void handleRemove(collection);
       },
     });
   }
 
-  /** 执行删除分享。 */
-  async function handleRemove(share: SavedShare): Promise<void> {
+  /** 执行删除合集。 */
+  async function handleRemove(collection: Collection): Promise<void> {
     try {
-      await removeShare(share.share_id);
+      await removeCollection(collection.collection_id);
       dispatch({
-        type: "shares/set",
-        shares: state.shares.filter((s) => s.share_id !== share.share_id),
+        type: "collections/remove",
+        collection_id: collection.collection_id,
       });
-      // 同步关闭当前正在看的分享
-      if (state.explorer?.share_id === share.share_id) {
-        dispatch({ type: "explorer/close" });
-      }
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     }
@@ -153,97 +199,106 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
 
   const emptyMaterial = state.materialDir === "";
 
+  function renderRow(collection: Collection): React.JSX.Element {
+    const active = state.activeCollectionId === collection.collection_id;
+    const icon =
+      collection.kind === "xiaohongshu" ? (
+        <BookOutlined style={{ color: "#fa541c" }} />
+      ) : (
+        <CloudOutlined style={{ color: "#1677ff" }} />
+      );
+    return (
+      <List.Item
+        className="collection-list-item"
+        style={{
+          background: active ? "#e6f4ff" : undefined,
+          borderRadius: 8,
+          padding: "8px 10px",
+          cursor: "pointer",
+          border: "none",
+        }}
+        onClick={() => {
+          handleOpen(collection);
+        }}
+        actions={[
+          <Dropdown
+            key="more"
+            trigger={["click"]}
+            menu={{
+              items: [
+                {
+                  key: "rename",
+                  label: "重命名",
+                  onClick: () => {
+                    setRenameTarget(collection);
+                    setRenameName(collection.name);
+                  },
+                },
+                {
+                  key: "remove",
+                  label: "删除",
+                  danger: true,
+                  icon: <DeleteOutlined />,
+                  onClick: () => {
+                    confirmRemove(collection);
+                  },
+                },
+              ],
+            }}
+          >
+            <Button
+              type="text"
+              size="small"
+              icon={<EllipsisOutlined />}
+              aria-label="更多操作"
+              onClick={(e) => {
+                e.stopPropagation();
+              }}
+            />
+          </Dropdown>,
+        ]}
+      >
+        <List.Item.Meta
+          avatar={icon}
+          title={
+            <Typography.Text
+              data-testid="collection-item"
+              ellipsis
+              style={{ maxWidth: 110 }}
+              title={collection.name}
+            >
+              {collection.name}
+            </Typography.Text>
+          }
+        />
+      </List.Item>
+    );
+  }
+
   return (
     <div className={className} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <style>{`.share-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s}
-.share-list-item:hover .ant-list-item-action,.share-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
+      <style>{`.collection-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s}
+.collection-list-item:hover .ant-list-item-action,.collection-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
       <div style={{ padding: 12 }}>
         <Button
-          data-testid="add-share-btn"
+          data-testid="add-collection-btn"
           type="primary"
           icon={<PlusOutlined />}
           block
           onClick={() => {
-            setAddForm({ url: "", pwd: "" });
+            setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
             setAddError("");
             setAddOpen(true);
           }}
         >
-          添加分享
+          新建合集
         </Button>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
         <List
-          dataSource={state.shares}
-          locale={{ emptyText: "暂无分享，请先添加" }}
-          renderItem={(share: SavedShare) => {
-            const active = state.activeShareId === share.share_id;
-            return (
-              <List.Item
-                className="share-list-item"
-                style={{
-                  background: active ? "#e6f4ff" : undefined,
-                  borderRadius: 8,
-                  padding: "8px 10px",
-                  cursor: "pointer",
-                  border: "none",
-                }}
-                onClick={() => {
-                  handleOpen(share);
-                }}
-                actions={[
-                  <Dropdown
-                    key="more"
-                    trigger={["click"]}
-                    menu={{
-                      items: [
-                        {
-                          key: "rename",
-                          label: "重命名",
-                          onClick: () => {
-                            setRenameTarget(share);
-                            setRenameName(share.name);
-                          },
-                        },
-                        {
-                          key: "remove",
-                          label: "删除",
-                          danger: true,
-                          icon: <DeleteOutlined />,
-                          onClick: () => {
-                            confirmRemove(share);
-                          },
-                        },
-                      ],
-                    }}
-                  >
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<EllipsisOutlined />}
-                      aria-label="更多操作"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                      }}
-                    />
-                  </Dropdown>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <Typography.Text
-                      data-testid="share-item"
-                      ellipsis
-                      style={{ maxWidth: 130 }}
-                      title={share.name}
-                    >
-                      {share.name}
-                    </Typography.Text>
-                  }
-                />
-              </List.Item>
-            );
-          }}
+          dataSource={state.collections}
+          locale={{ emptyText: "暂无合集，请先新建" }}
+          renderItem={renderRow}
         />
       </div>
       <Divider style={{ margin: "4px 0 0" }} />
@@ -275,12 +330,12 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
         </div>
       </div>
       <Modal
-        title="添加分享"
+        title="新建合集"
         open={addOpen}
         confirmLoading={addLoading}
-        okText="添加"
+        okText="新建"
         cancelText="取消"
-        okButtonProps={{ "data-testid": "add-share-confirm" }}
+        okButtonProps={{ "data-testid": "add-collection-confirm" }}
         onOk={() => {
           void handleAddConfirm();
         }}
@@ -289,33 +344,60 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
         }}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <div style={{ marginBottom: 6 }}>分享链接</div>
-            <Input
-              data-testid="share-url-input"
-              placeholder="https://www.alipan.com/s/xxxx"
-              value={addForm.url}
-              onChange={(e) => {
-                setAddForm((s) => ({ ...s, url: e.target.value }));
-              }}
-            />
-          </div>
-          <div>
-            <div style={{ marginBottom: 6 }}>提取密码（可选）</div>
-            <Input
-              data-testid="share-pwd-input"
-              placeholder="无密码可不填"
-              value={addForm.pwd}
-              onChange={(e) => {
-                setAddForm((s) => ({ ...s, pwd: e.target.value }));
-              }}
-            />
-          </div>
+          <Radio.Group
+            data-testid="collection-kind-radio"
+            value={addForm.kind}
+            onChange={(e) => {
+              setAddForm((s) => ({ ...s, kind: e.target.value as CollectionKind }));
+              setAddError("");
+            }}
+          >
+            <Radio.Button value="alipan">阿里云盘分享</Radio.Button>
+            <Radio.Button value="xiaohongshu">小红书合集</Radio.Button>
+          </Radio.Group>
+          {addForm.kind === "alipan" ? (
+            <>
+              <div>
+                <div style={{ marginBottom: 6 }}>分享链接</div>
+                <Input
+                  data-testid="collection-url-input"
+                  placeholder="https://www.alipan.com/s/xxxx"
+                  value={addForm.url}
+                  onChange={(e) => {
+                    setAddForm((s) => ({ ...s, url: e.target.value }));
+                  }}
+                />
+              </div>
+              <div>
+                <div style={{ marginBottom: 6 }}>提取密码（可选）</div>
+                <Input
+                  data-testid="collection-pwd-input"
+                  placeholder="无密码可不填"
+                  value={addForm.pwd}
+                  onChange={(e) => {
+                    setAddForm((s) => ({ ...s, pwd: e.target.value }));
+                  }}
+                />
+              </div>
+            </>
+          ) : (
+            <div>
+              <div style={{ marginBottom: 6 }}>合集名（将在素材文件夹下创建同名目录）</div>
+              <Input
+                data-testid="collection-name-input"
+                placeholder="例如：美食探店第1期"
+                value={addForm.name}
+                onChange={(e) => {
+                  setAddForm((s) => ({ ...s, name: e.target.value }));
+                }}
+              />
+            </div>
+          )}
           {addError !== "" ? <Typography.Text type="danger">{addError}</Typography.Text> : null}
         </div>
       </Modal>
       <Modal
-        title="重命名分享"
+        title="重命名合集"
         open={renameTarget !== null}
         confirmLoading={renameLoading}
         okText="保存"
@@ -328,7 +410,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
         }}
       >
         <Input
-          placeholder="请输入新的分享名称"
+          placeholder="请输入新的合集名称"
           value={renameName}
           onChange={(e) => {
             setRenameName(e.target.value);

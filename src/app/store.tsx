@@ -5,11 +5,12 @@ import {
   type Dispatch,
   type ReactNode,
 } from "react";
-import type { SavedShare, ShareItem } from "./api";
+import type { Collection, CollectionKind, ShareItem } from "./api";
 
 // ---- State ----
 
 export interface StackEntry {
+  /** alipan 下为远端 file_id；xiaohongshu 下即 relPath（根为合集 relDir）。语义保留。 */
   file_id: string;
   name: string;
 }
@@ -24,27 +25,31 @@ export interface ExplorerProgress {
   total: number;
 }
 
-/** 右侧单分享浏览状态（原多页签 Tab，已去页签化：同时只看一个分享）。 */
+/** 浏览文件：云盘条目原样；小红书本地文件经合成（absPath 为本地绝对路径）。 */
+export type ExplorerFile = ShareItem & { absPath?: string };
+
+/** 右侧单合集浏览状态（原多页签 Tab，已去页签化：同时只看一个合集）。 */
 export interface Explorer {
-  share_id: string;
-  share_name: string;
+  collection_id: string;
+  collection_name: string;
+  kind: CollectionKind;
   stack: StackEntry[];
-  selected_file?: ShareItem;
+  selected_file?: ExplorerFile;
   /** hover 命中的文件（空格预览的目标，不等同于选中）。 */
-  hovered_file?: ShareItem;
+  hovered_file?: ExplorerFile;
   /** 空格预览中的文件（Quick Look 弹窗，无标题栏/下载按钮）。 */
-  preview_file?: ShareItem;
+  preview_file?: ExplorerFile;
   /** 双击打开的文件（完整播放器：半透明遮罩 + 标题栏 + 下载）。 */
-  opened_file?: ShareItem;
+  opened_file?: ExplorerFile;
   video?: ExplorerVideo;
   progress?: Record<string, ExplorerProgress>;
 }
 
 export interface AppState {
-  shares: SavedShare[];
-  /** 当前打开的分享 id，无打开时为 null。 */
-  activeShareId: string | null;
-  /** 当前浏览状态，无打开分享时为 null。 */
+  collections: Collection[];
+  /** 当前打开的合集 id，无打开时为 null。 */
+  activeCollectionId: string | null;
+  /** 当前浏览状态，无打开合集时为 null。 */
   explorer: Explorer | null;
   /** 素材目录：UI 侧会与 null 比较，故类型放宽，初始值仍为 ""。 */
   materialDir: string | null;
@@ -52,8 +57,8 @@ export interface AppState {
 }
 
 export const initialState: AppState = {
-  shares: [],
-  activeShareId: null,
+  collections: [],
+  activeCollectionId: null,
   explorer: null,
   materialDir: "",
   globalError: null,
@@ -62,21 +67,21 @@ export const initialState: AppState = {
 // ---- Action ----
 
 export type Action =
-  | { type: "shares/set"; shares: SavedShare[] }
-  | { type: "shares/add"; share: SavedShare }
-  | { type: "shares/rename"; share_id: string; name: string }
-  | { type: "shares/remove"; share_id: string }
+  | { type: "collections/set"; collections: Collection[] }
+  | { type: "collections/add"; collection: Collection }
+  | { type: "collections/rename"; collection_id: string; name: string }
+  | { type: "collections/remove"; collection_id: string }
   | { type: "material/set"; dir: string }
   | { type: "error/set"; message: string | null }
-  | { type: "explorer/open"; share: SavedShare }
+  | { type: "explorer/open"; collection: Collection }
   | { type: "explorer/close" }
   | { type: "explorer/navigate"; stack: StackEntry[] }
   | { type: "explorer/push"; entry: StackEntry }
   | { type: "explorer/pop" }
-  | { type: "explorer/select"; file?: ShareItem }
-  | { type: "explorer/hover"; file?: ShareItem }
-  | { type: "explorer/preview"; file?: ShareItem }
-  | { type: "explorer/openFile"; file?: ShareItem }
+  | { type: "explorer/select"; file?: ExplorerFile }
+  | { type: "explorer/hover"; file?: ExplorerFile }
+  | { type: "explorer/preview"; file?: ExplorerFile }
+  | { type: "explorer/openFile"; file?: ExplorerFile }
   | { type: "explorer/video"; video?: ExplorerVideo }
   | {
       type: "explorer/progress";
@@ -114,38 +119,42 @@ function clearProgress(state: AppState, fileId: string): AppState {
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case "shares/set":
-      return { ...state, shares: action.shares };
-    case "shares/add": {
-      const exists = state.shares.some((s) => s.share_id === action.share.share_id);
+    case "collections/set":
+      return { ...state, collections: action.collections };
+    case "collections/add": {
+      const exists = state.collections.some(
+        (s) => s.collection_id === action.collection.collection_id,
+      );
       return {
         ...state,
-        shares: exists
-          ? state.shares.map((s) =>
-              s.share_id === action.share.share_id ? action.share : s,
+        collections: exists
+          ? state.collections.map((s) =>
+              s.collection_id === action.collection.collection_id ? action.collection : s,
             )
-          : [...state.shares, action.share],
+          : [...state.collections, action.collection],
       };
     }
-    case "shares/rename":
+    case "collections/rename":
       return {
         ...state,
-        shares: state.shares.map((s) =>
-          s.share_id === action.share_id ? { ...s, name: action.name } : s,
+        collections: state.collections.map((s) =>
+          s.collection_id === action.collection_id ? { ...s, name: action.name } : s,
         ),
         explorer:
-          state.explorer !== null && state.explorer.share_id === action.share_id
-            ? { ...state.explorer, share_name: action.name }
+          state.explorer !== null && state.explorer.collection_id === action.collection_id
+            ? { ...state.explorer, collection_name: action.name }
             : state.explorer,
       };
-    case "shares/remove": {
-      const shares = state.shares.filter((s) => s.share_id !== action.share_id);
+    case "collections/remove": {
+      const collections = state.collections.filter(
+        (s) => s.collection_id !== action.collection_id,
+      );
       const closingCurrent =
-        state.explorer !== null && state.explorer.share_id === action.share_id;
+        state.explorer !== null && state.explorer.collection_id === action.collection_id;
       return {
         ...state,
-        shares,
-        activeShareId: closingCurrent ? null : state.activeShareId,
+        collections,
+        activeCollectionId: closingCurrent ? null : state.activeCollectionId,
         explorer: closingCurrent ? null : state.explorer,
       };
     }
@@ -154,19 +163,22 @@ export function reducer(state: AppState, action: Action): AppState {
     case "error/set":
       return { ...state, globalError: action.message };
     case "explorer/open": {
-      // 根目录 file_id 约定为 "root"，stack[0] 即根。
+      // alipan 根 file_id 约定为 "root"；xiaohongshu 根为合集 relDir（相对 target_dir 的完整路径）。
+      const isXhs = action.collection.kind === "xiaohongshu";
+      const rootId = isXhs ? (action.collection.relDir ?? "") : "root";
       return {
         ...state,
-        activeShareId: action.share.share_id,
+        activeCollectionId: action.collection.collection_id,
         explorer: {
-          share_id: action.share.share_id,
-          share_name: action.share.name,
-          stack: [{ file_id: "root", name: "分享根目录" }],
+          collection_id: action.collection.collection_id,
+          collection_name: action.collection.name,
+          kind: action.collection.kind,
+          stack: [{ file_id: rootId, name: "合集根目录" }],
         },
       };
     }
     case "explorer/close":
-      return { ...state, activeShareId: null, explorer: null };
+      return { ...state, activeCollectionId: null, explorer: null };
     case "explorer/navigate":
       return mapExplorer(state, (e) => ({ ...e, stack: action.stack, hovered_file: undefined }));
     case "explorer/push":

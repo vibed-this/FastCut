@@ -2,8 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol } from 
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
-import type { SavedShare as IpcSavedShare } from "../shared/contract.js";
-import { downloadVideo, isDownloading } from "./downloader.js";
+import type { AddCollectionInput, Collection as IpcCollection } from "../shared/contract.js";
+import { downloadVideo, downloadXhsDirect, isDownloading } from "./downloader.js";
+import { fsList, fsMkdir, fsMove, fsRemove, fsRename } from "./localfs.js";
+import { XhsClient } from "./xhs-client.js";
 import {
   get_share_meta,
   list_share,
@@ -17,16 +19,16 @@ import {
   warmThumbnails,
 } from "./thumbnail-cache.js";
 import {
-  addShare,
+  addCollection,
   getConfig,
   getStatus,
   getStatusBatch,
-  listShares,
-  removeShare,
-  renameShare,
+  listCollections,
+  removeCollection,
+  renameCollection,
   setConfig,
   setIsDownloadingProvider,
-  type SavedShare as StoreSavedShare,
+  type Collection as StoreCollection,
 } from "./store.js";
 
 /** 当前主窗口（activate 重建后更新，handler 经 getWin 懒取，注册一次即可）。 */
@@ -38,50 +40,106 @@ function getWin(): BrowserWindow {
   return win;
 }
 
-/** store 落盘形（pwd 可选）→ IPC 契约形（无 pwd 即 null，与序列化一致）。 */
-function toIpcShare(s: StoreSavedShare): IpcSavedShare {
-  return { ...s, pwd: s.pwd ?? null };
+/** store 形 → IPC 契约形（alipan 无 pwd 即 null，与落盘序列化一致）。 */
+function toIpcCollection(s: StoreCollection): IpcCollection {
+  if (s.kind === "alipan" && s.pwd === undefined) return { ...s, pwd: null };
+  return { ...s };
 }
 
-/** 错误统一转字符串抛给 renderer（保持旧 Tauri "Err(String)" 语义）。 */
+/** 错误统一转字符串抛给 renderer（保持旧 "Err(String)" 语义）。 */
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+async function requireTargetDir(userDataDir: string): Promise<string> {
+  const config = await getConfig(userDataDir);
+  const dir = config.target_dir?.trim() ?? "";
+  if (dir === "") throw new Error("未配置目标文件夹，请先在设置页选择下载目录");
+  return dir;
+}
+
 /**
- * 注册全部 16 个 `ipcMain.handle`（channel/入参/返回见 `electron/shared/contract.ts`）。
+ * 注册全部 `ipcMain.handle`（channel/入参/返回见 `electron/shared/contract.ts`）。
  * 只调用一次（重复注册会抛）；窗口引用经 `getWin()` 懒取。
  */
 function registerIpcHandlers(userDataDir: string): void {
-  ipcMain.handle("list_shares", async () => {
+  ipcMain.handle("collection_list", async () => {
     try {
-      return (await listShares(userDataDir)).map(toIpcShare);
+      return (await listCollections(userDataDir)).map(toIpcCollection);
     } catch (e) {
       throw new Error(errMsg(e));
     }
   });
 
-  ipcMain.handle("add_share", async (_e, args: { url: string; pwd?: string }) => {
+  ipcMain.handle("collection_add", async (_e, args: AddCollectionInput) => {
     try {
-      return toIpcShare(await addShare(userDataDir, args.url, args.pwd));
+      return toIpcCollection(await addCollection(userDataDir, args));
     } catch (e) {
       throw new Error(errMsg(e));
     }
   });
 
-  ipcMain.handle("rename_share", async (_e, args: { shareId: string; name: string }) => {
+  ipcMain.handle("collection_rename", async (_e, args: { id: string; name: string }) => {
     try {
-      return toIpcShare(await renameShare(userDataDir, args.shareId, args.name));
+      return toIpcCollection(await renameCollection(userDataDir, args.id, args.name));
     } catch (e) {
       throw new Error(errMsg(e));
     }
   });
 
-  ipcMain.handle("remove_share", async (_e, args: { shareId: string }) => {
+  ipcMain.handle("collection_remove", async (_e, args: { id: string }) => {
     try {
-      await removeShare(userDataDir, args.shareId);
-      // 分享删除即清其缩略图缓存（best-effort，不影响删除结果）
-      await clearShareThumbnails(userDataDir, args.shareId);
+      const removed = await removeCollection(userDataDir, args.id);
+      // alipan 合集删除即清其缩略图缓存（best-effort，不影响删除结果）；
+      // xiaohongshu 磁盘文件夹已在 store 层删除。
+      if (removed.kind === "alipan") {
+        await clearShareThumbnails(userDataDir, removed.share_id ?? removed.id);
+      }
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("fs_list", async (_e, args: { relDir?: string }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      return await fsList(targetDir, args.relDir ?? "");
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("fs_mkdir", async (_e, args: { relDir: string }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      await fsMkdir(targetDir, args.relDir);
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("fs_rename", async (_e, args: { relPath: string; name: string }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      await fsRename(targetDir, args.relPath, args.name);
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("fs_move", async (_e, args: { relPath: string; destDir: string }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      await fsMove(targetDir, args.relPath, args.destDir);
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("fs_remove", async (_e, args: { relPath: string }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      await fsRemove(targetDir, args.relPath);
     } catch (e) {
       throw new Error(errMsg(e));
     }
@@ -156,7 +214,7 @@ function registerIpcHandlers(userDataDir: string): void {
     "video_preview",
     async (_e, args: { shareId: string; driveId: string; fileId: string; pwd?: string }) => {
       try {
-        // 旧 Rust command 固定传 None 作 pwd，此处逐字保留：入参的 pwd 兼容接收但不透传。
+        // 旧 command 固定传 None 作 pwd，此处保留：入参的 pwd 兼容接收但不透传。
         return await video_preview(args.shareId, args.driveId, args.fileId);
       } catch (e) {
         throw new Error(errMsg(e));
@@ -248,6 +306,63 @@ function registerIpcHandlers(userDataDir: string): void {
       throw new Error(errMsg(e));
     }
   });
+
+  ipcMain.handle("xhs_parse", async (_e, args: { url: string }) => {
+    try {
+      const raw = args.url?.trim() ?? "";
+      if (raw === "") throw new Error("链接不能为空");
+      if (!raw.includes("xiaohongshu.com") && !raw.includes("xhslink.com")) {
+        throw new Error("仅支持小红书链接（xiaohongshu.com / xhslink.com）");
+      }
+      return await new XhsClient().parse(raw);
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle(
+    "xhs_import",
+    async (
+      _e,
+      args: { url: string; collectionId: string; subDir?: string; fileName?: string },
+    ) => {
+      try {
+        const raw = args.url?.trim() ?? "";
+        if (raw === "") throw new Error("链接不能为空");
+        const collectionId = args.collectionId?.trim() ?? "";
+        if (collectionId === "") throw new Error("合集不能为空");
+        const parsed = await new XhsClient().parse(raw);
+        // 由合集 id 查 relDir：调用方传的 subDir 为相对 target_dir 的完整路径（合集根即其 relDir）；
+        // 缺省则落到合集根目录。合集不存在或非 xiaohongshu 直接报错，不静默另建目录。
+        const collections = await listCollections(userDataDir);
+        const coll = collections.find((c) => c.id === collectionId);
+        if (coll === undefined) throw new Error("合集不存在");
+        if (coll.kind !== "xiaohongshu" || coll.relDir === undefined || coll.relDir.trim() === "") {
+          throw new Error("仅小红书合集支持导入");
+        }
+        const sub = (args.subDir ?? "").trim();
+        const relDir = sub === "" ? coll.relDir : sub.startsWith(coll.relDir) ? sub : `${coll.relDir}/${sub}`;
+        const win = getWin();
+        return await downloadXhsDirect({
+          downloadUrl: parsed.downloadUrl,
+          collectionId,
+          relDir,
+          fileName: args.fileName ?? parsed.title,
+          title: parsed.title,
+          noteId: parsed.noteId,
+          author: parsed.author,
+          cover: parsed.cover,
+          sourceUrl: raw,
+          userDataDir,
+          emit: (event, payload) => {
+            win.webContents.send(event, payload);
+          },
+        });
+      } catch (e) {
+        throw new Error(errMsg(e));
+      }
+    },
+  );
 
   /**
    * 原生拖出：Renderer 已保存磁贴 `ondragstart`（已 `preventDefault`）后发来本地绝对路径，

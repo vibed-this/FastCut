@@ -1,25 +1,45 @@
-/** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，命中本地磁盘缓存秒显，禁止逐项调 preview）。 */
+/** 文件夹浏览：alipan 只读网格 + xiaohongshu 本地 fs 网格（面包屑走 relPath）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App as AntdApp, Breadcrumb, Button, Space, Spin, Typography } from "antd";
+import {
+  App as AntdApp,
+  Breadcrumb,
+  Button,
+  Input,
+  Modal,
+  Space,
+  Spin,
+  Tooltip,
+  Typography,
+} from "antd";
 import {
   CheckCircleFilled,
+  DeleteOutlined,
   DownloadOutlined,
   FileOutlined,
+  FolderAddOutlined,
   FolderFilled,
+  ImportOutlined,
   LoadingOutlined,
+  SwapOutlined,
   VideoCameraOutlined,
 } from "@ant-design/icons";
 import {
   downloadVideo,
+  fsList,
+  fsMkdir,
+  fsMove,
+  fsRemove,
+  fsRename,
   getStatusBatch,
   listShare,
   onDownloadDone,
   onDownloadProgress,
   videoPreview,
   warmThumbnails,
+  xhsImport,
 } from "../api";
-import type { FileStatus, ShareItem } from "../api";
-import { useStore } from "../store";
+import type { FileStatus, FsEntry, ShareItem } from "../api";
+import { useStore, type ExplorerFile } from "../store";
 import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
 
 /** 文件夹视图属性。 */
@@ -41,6 +61,29 @@ export function isVideoFile(item: ShareItem): boolean {
   }
   const ext = (item.file_extension ?? "").toLowerCase();
   return ["mp4", "mkv", "mov", "m3u8", "avi", "webm"].includes(ext);
+}
+
+function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+}
+
+function isVideoName(name: string): boolean {
+  return ["mp4", "mkv", "mov", "m3u8", "avi", "webm"].includes(extOf(name));
+}
+
+/** 本地条目 → 浏览文件（file_id 即 relPath，video 判定走扩展名）。 */
+function fsEntryToFile(e: FsEntry): ExplorerFile {
+  const video = !e.isDir && isVideoName(e.name);
+  return {
+    file_id: e.relPath,
+    drive_id: "local",
+    name: e.name,
+    type: e.isDir ? "folder" : "file",
+    category: video ? "video" : undefined,
+    file_extension: e.isDir ? undefined : extOf(e.name),
+    absPath: e.absPath,
+  };
 }
 
 /**
@@ -121,7 +164,7 @@ function ThumbImage(props: { src: string; name: string; video: boolean }): React
 }
 
 /**
- * 文件夹视图。
+ * 文件夹视图（双模式：alipan 只读远端网格，xiaohongshu 本地 fs 网格+写操作）。
  *
  * @param props - 组件属性
  * @returns 文件夹浏览元素
@@ -129,8 +172,12 @@ function ThumbImage(props: { src: string; name: string; video: boolean }): React
 export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const { className } = props;
   const { state, dispatch } = useStore();
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const explorer = state.explorer;
+  const kind = explorer?.kind ?? "alipan";
+  const isXhs = kind === "xiaohongshu";
+
+  // ---- alipan 远端状态 ----
   const [items, setItems] = useState<ShareItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -142,15 +189,33 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   /** 磁贴直下取链中（preview 未返回、progress 事件未到前的空窗期即转圈、防连点）。 */
   const [tilePendingMap, setTilePendingMap] = useState<Record<string, boolean>>({});
 
+  // ---- xiaohongshu 本地状态 ----
+  const [xhsItems, setXhsItems] = useState<FsEntry[]>([]);
+  const [xhsLoading, setXhsLoading] = useState(false);
+  const [xhsSelected, setXhsSelected] = useState<string[]>([]);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
+  const [importError, setImportError] = useState("");
+  const [importConfirming, setImportConfirming] = useState(false);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState("");
+  const [mkdirLoading, setMkdirLoading] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveDest, setMoveDest] = useState("");
+  const [moveLoading, setMoveLoading] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameLoading, setRenameLoading] = useState(false);
+
   /** 后台预取一批缩略图（fire-and-forget：失败回退远程 URL，不弹错）。 */
-  function warmBatch(shareId: string, batch: ShareItem[]): void {
+  function warmBatch(collectionId: string, batch: ShareItem[]): void {
     const entries = batch
       .filter((i) => i.thumbnail !== undefined && i.thumbnail !== "")
       .map((i) => ({ fileId: i.file_id, url: i.thumbnail as string }));
     if (entries.length === 0) {
       return;
     }
-    warmThumbnails(shareId, entries)
+    warmThumbnails(collectionId, entries)
       .then((cached) => {
         setThumbLocalMap((prev) => ({ ...prev, ...cached }));
       })
@@ -158,12 +223,12 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   }
 
   /** 把一批条目的状态并入映射（只查新增 id）。 */
-  async function mergeStatuses(shareId: string, batch: ShareItem[]): Promise<void> {
+  async function mergeStatuses(collectionId: string, batch: ShareItem[]): Promise<void> {
     if (batch.length === 0) {
       return;
     }
     const statuses = await getStatusBatch(
-      shareId,
+      collectionId,
       batch.map((i) => i.file_id),
     );
     setStatusMap((prev) => {
@@ -184,9 +249,40 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [explorer?.progress],
   );
+  const collectionKey = explorer?.collection_id ?? "";
+
+  // 当前本地相对目录（xhs 栈顶 file_id 即 relPath）。
+  const currentRelDir = useMemo(() => {
+    if (explorer === undefined || explorer === null || explorer.stack.length === 0) return "";
+    return explorer.stack[explorer.stack.length - 1]?.file_id ?? "";
+  }, [explorer]);
+
+  /** xhs 本地目录加载。 */
+  const loadXhs = useCallback(async () => {
+    if (explorer === undefined || explorer === null || explorer.kind !== "xiaohongshu") {
+      return;
+    }
+    const top = explorer.stack[explorer.stack.length - 1];
+    const relDir = top?.file_id ?? "";
+    setXhsLoading(true);
+    try {
+      const entries = await fsList(relDir);
+      setXhsItems(entries);
+      setXhsSelected([]);
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setXhsLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionKey, stackKey]);
 
   const load = useCallback(async () => {
     if (explorer === undefined || explorer === null) {
+      return;
+    }
+    if (explorer.kind === "xiaohongshu") {
+      await loadXhs();
       return;
     }
     const current = explorer.stack[explorer.stack.length - 1];
@@ -196,43 +292,44 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     setLoading(true);
     try {
       // 首屏只取一页，大目录靠“加载更多”续取，避免一次拉全卡死。
-      const res = await listShare(explorer.share_id, current.file_id, undefined, PAGE_SIZE);
+      const res = await listShare(explorer.collection_id, current.file_id, undefined, PAGE_SIZE);
       setItems(res.items);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
       setStatusMap({});
-      await mergeStatuses(explorer.share_id, res.items);
-      warmBatch(explorer.share_id, res.items);
+      await mergeStatuses(explorer.collection_id, res.items);
+      warmBatch(explorer.collection_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [explorer?.share_id, stackKey]);
+  }, [collectionKey, stackKey, loadXhs]);
 
   /** 用 next_marker 续取下一页并追加（loadingMore/到底 guard 防重复请求）。 */
   const loadMore = useCallback(async (): Promise<void> => {
     if (explorer === undefined || explorer === null || nextMarker === null || loadingMore || loading) {
       return;
     }
+    if (explorer.kind === "xiaohongshu") return;
     const current = explorer.stack[explorer.stack.length - 1];
     if (current === undefined) {
       return;
     }
     setLoadingMore(true);
     try {
-      const res = await listShare(explorer.share_id, current.file_id, nextMarker, PAGE_SIZE);
+      const res = await listShare(explorer.collection_id, current.file_id, nextMarker, PAGE_SIZE);
       setItems((prev) => [...prev, ...res.items]);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
-      await mergeStatuses(explorer.share_id, res.items);
-      warmBatch(explorer.share_id, res.items);
+      await mergeStatuses(explorer.collection_id, res.items);
+      warmBatch(explorer.collection_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingMore(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [explorer?.share_id, stackKey, nextMarker, loadingMore, loading]);
+  }, [collectionKey, stackKey, nextMarker, loadingMore, loading]);
 
   /** 列表底部 sentinel：进入视口时自动触发下一页（含防抖 + loading guard）。 */
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -266,13 +363,13 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     return () => {
       observer.disconnect();
     };
-  }, [loadMore, nextMarker, explorer?.share_id, stackKey]);
+  }, [loadMore, nextMarker, collectionKey, stackKey]);
 
   useEffect(() => {
     void load();
     // 挂载与 stack 变化时刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [explorer?.share_id, stackKey]);
+  }, [collectionKey, stackKey]);
 
   // 下载进度/完成订阅（单视图一份：open/预览触发的下载都推进度；
   // 自动下载的完成 toast 静默，手动保存仍提示；progress 变化驱动下方状态重查，磁贴绿勾自动出现）。
@@ -302,6 +399,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       } else if (!silent) {
         void message.success("下载完成");
       }
+      // xhs 导入完成后刷新本地列表。
+      if (d.ok && explorer?.kind === "xiaohongshu") {
+        void loadXhs();
+      }
     }).then((off) => {
       if (cancelled) {
         off();
@@ -315,22 +416,24 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       offDone?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [collectionKey]);
 
-  // 下载进度变化后刷新当前分享状态（含完成清空后终查一次，落"已保存"角标）；
+  // 下载进度变化后刷新当前合集状态（含完成清空后终查一次，落"已保存"角标）；
   // 用 ref 跳过挂载首跑（load 已查过），key 未变（纯 done/total 推进）不重查。
+  // 仅 alipan 模式需要（xhs 文件本就在磁盘上）。
   const prevProgressKey = useRef("");
   useEffect(() => {
     if (explorer === undefined || explorer === null || items.length === 0) {
       return;
     }
+    if (explorer.kind === "xiaohongshu") return;
     if (progressKey === prevProgressKey.current) {
       return;
     }
     prevProgressKey.current = progressKey;
     let cancelled = false;
     void getStatusBatch(
-      explorer.share_id,
+      explorer.collection_id,
       items.map((i) => i.file_id),
     )
       .then((statuses) => {
@@ -354,18 +457,18 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   }, [progressKey]);
 
   if (explorer === undefined || explorer === null) {
-    return <Typography.Text type="secondary">暂无打开的分享，请从左侧选择</Typography.Text>;
+    return <Typography.Text type="secondary">暂无打开的合集，请从左侧选择</Typography.Text>;
   }
   /** 收窄后的当前浏览（闭包内直接用，避免 TS18048）。 */
   const currentExplorer = explorer;
 
   /** 进入文件夹。 */
-  function enterFolder(item: ShareItem): void {
+  function enterFolder(item: ExplorerFile): void {
     dispatch({ type: "explorer/push", entry: { file_id: item.file_id, name: item.name } });
   }
 
   /** 单击打开完整播放器（选中 + 半透明遮罩 + 标题栏 + 下载）。 */
-  function openFile(item: ShareItem): void {
+  function openFile(item: ExplorerFile): void {
     dispatch({ type: "explorer/select", file: item });
     dispatch({ type: "explorer/openFile", file: item });
   }
@@ -374,8 +477,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
    * 磁贴直下：不开播放器直接下载（hover 下载按钮用）。
    * 与 VideoPane.handleSave 同策略（最高档 + stack 子目录），但走手动路径：
    * 有开始/完成 toast，不进自动静默集合。取链空窗期用 tilePending 转圈。
+   * 仅 alipan 模式可用。
    */
-  async function handleTileDownload(item: ShareItem): Promise<void> {
+  async function handleTileDownload(item: ExplorerFile): Promise<void> {
+    if (currentExplorer.kind !== "alipan") return;
     if (item.type === "folder" || !isVideoFile(item)) {
       return;
     }
@@ -391,7 +496,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     }
     setTilePendingMap((prev) => ({ ...prev, [item.file_id]: true }));
     try {
-      const statuses = await getStatusBatch(currentExplorer.share_id, [item.file_id]);
+      const statuses = await getStatusBatch(currentExplorer.collection_id, [item.file_id]);
       if (statuses.some((s) => s.file_id === item.file_id && s.state === "saved")) {
         setStatusMap((prev) => {
           const map = { ...prev };
@@ -403,7 +508,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         void message.info("该文件已保存");
         return;
       }
-      const list = await videoPreview(currentExplorer.share_id, item.drive_id, item.file_id);
+      const list = await videoPreview(currentExplorer.collection_id, item.drive_id, item.file_id);
       const picked = pickUsableTemplate(list);
       if (picked === undefined || picked.preview_url === undefined || picked.preview_url === "") {
         throw new Error("没有可用的预览档");
@@ -415,7 +520,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         .filter((n) => n !== "");
       await downloadVideo(
         picked.preview_url,
-        currentExplorer.share_id,
+        currentExplorer.collection_id,
         item.file_id,
         item.name,
         picked.template_id,
@@ -433,6 +538,148 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     }
   }
 
+  // ---- xhs 写操作 ----
+
+  /** 直接导入：解析与下载一次完成（解析在后端 xhs_import 内做），失败行内报错。 */
+  async function handleImportConfirm(): Promise<void> {
+    const url = importUrl.trim();
+    if (url === "") {
+      setImportError("请粘贴小红书链接");
+      return;
+    }
+    setImportConfirming(true);
+    setImportError("");
+    try {
+      await xhsImport(url, {
+        collectionId: currentExplorer.collection_id,
+        relDir: currentRelDir,
+      });
+      void message.success("已开始导入");
+      setImportOpen(false);
+      setImportUrl("");
+      setImportError("");
+      await loadXhs();
+    } catch (e) {
+      // 行内报错，不关弹窗，方便换链接重试
+      setImportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImportConfirming(false);
+    }
+  }
+
+  async function handleMkdirConfirm(): Promise<void> {
+    const name = mkdirName.trim();
+    if (name === "") {
+      void message.warning("请输入文件夹名");
+      return;
+    }
+    setMkdirLoading(true);
+    try {
+      await fsMkdir(currentRelDir, name);
+      setMkdirOpen(false);
+      setMkdirName("");
+      await loadXhs();
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMkdirLoading(false);
+    }
+  }
+
+  function confirmXhsDelete(): void {
+    if (xhsSelected.length === 0) {
+      void message.warning("请先选择要删除的文件");
+      return;
+    }
+    modal.confirm({
+      title: `确定删除选中的 ${xhsSelected.length} 项吗？`,
+      okText: "删除",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: () => {
+        void (async () => {
+          try {
+            for (const rel of xhsSelected) {
+              await fsRemove(rel);
+            }
+            void message.success("已删除");
+            await loadXhs();
+          } catch (e) {
+            void message.error(e instanceof Error ? e.message : String(e));
+          }
+        })();
+      },
+    });
+  }
+
+  async function handleMoveConfirm(): Promise<void> {
+    if (xhsSelected.length === 0) {
+      void message.warning("请先选择要移动的文件");
+      return;
+    }
+    const rawDest = moveDest.trim();
+    if (rawDest === "") {
+      void message.warning("请输入目标目录");
+      return;
+    }
+    // 目标约束在当前合集内：单段名视为当前目录下的子目录；完整路径必须位于合集根内。
+    const rootRel = currentExplorer.stack[0]?.file_id ?? "";
+    const dest =
+      rawDest.includes("/") || rawDest.includes("\\")
+        ? rawDest
+        : currentRelDir === ""
+          ? rawDest
+          : `${currentRelDir.replace(/\/+$/, "")}/${rawDest}`;
+    if (rootRel !== "" && dest !== rootRel && !dest.startsWith(`${rootRel}/`)) {
+      void message.warning("只能移动到当前合集内部目录");
+      return;
+    }
+    setMoveLoading(true);
+    try {
+      for (const rel of xhsSelected) {
+        await fsMove(rel, dest);
+      }
+      setMoveOpen(false);
+      setMoveDest("");
+      void message.success("已移动");
+      await loadXhs();
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMoveLoading(false);
+    }
+  }
+
+  async function handleXhsRenameConfirm(): Promise<void> {
+    if (xhsSelected.length !== 1) return;
+    const target = xhsSelected[0];
+    if (target === undefined) return;
+    const newName = renameValue.trim();
+    if (newName === "") {
+      void message.warning("请输入新名称");
+      return;
+    }
+    // 兼容旧后端：优先 fs_rename，失败回退 collection_rename 语义由 api 层处理；
+    // 此处直接调 fsRename。
+    setRenameLoading(true);
+    try {
+      await fsRename(target, newName);
+      setRenameOpen(false);
+      setRenameValue("");
+      await loadXhs();
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRenameLoading(false);
+    }
+  }
+
+  function toggleXhsSelect(relPath: string): void {
+    setXhsSelected((prev) =>
+      prev.includes(relPath) ? prev.filter((r) => r !== relPath) : [...prev, relPath],
+    );
+  }
+
   /** 文件夹排前面，其余保持接口返回顺序（资源管理器式）。 */
   const sortedItems = useMemo(
     () =>
@@ -444,8 +691,18 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     [items],
   );
 
+  const sortedXhs = useMemo(
+    () =>
+      [...xhsItems].sort((a, b) => {
+        const af = a.isDir ? 0 : 1;
+        const bf = b.isDir ? 0 : 1;
+        return af - bf;
+      }),
+    [xhsItems],
+  );
+
   /** 单个缩略图磁贴（图片/视频均用服务端 thumbnail 快照，无则回退图标）。 */
-  function renderTile(item: ShareItem): React.JSX.Element {
+  function renderTile(item: ExplorerFile): React.JSX.Element {
     const isFolder = item.type === "folder";
     const isVideo = isVideoFile(item);
     const previewable = isFolder || isVideo;
@@ -621,10 +878,192 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     );
   }
 
+  /** 小红书本地磁贴（本地文件直接可拖，无下载态）。 */
+  function renderXhsTile(entry: FsEntry): React.JSX.Element {
+    const file = fsEntryToFile(entry);
+    const isFolder = entry.isDir;
+    const isVideo = !isFolder && isVideoFile(file);
+    const previewable = isFolder || isVideo;
+    const selected =
+      currentExplorer.selected_file?.file_id === entry.relPath ||
+      xhsSelected.includes(entry.relPath);
+    const downloading = currentExplorer.progress?.[entry.relPath] !== undefined;
+    const localPath = entry.absPath;
+    const cornerMark = downloading ? (
+      <span
+        data-testid="tile-downloading"
+        title="导入中…"
+        style={{
+          position: "absolute",
+          top: 6,
+          left: 6,
+          zIndex: 1,
+          width: 24,
+          height: 24,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#fff",
+          borderRadius: "50%",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+        }}
+      >
+        <LoadingOutlined style={{ fontSize: 14, color: "#1677ff" }} spin />
+      </span>
+    ) : null;
+    const cover = isFolder ? (
+      <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
+    ) : isVideo ? (
+      <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
+    ) : (
+      <FileOutlined style={{ fontSize: 52, color: "#999" }} />
+    );
+    const draggable = !isFolder && localPath !== undefined;
+    return (
+      <div
+        data-testid={isFolder ? "enter-folder" : "preview-file"}
+        title={draggable ? "本地文件，可拖到剪辑软件时间线" : previewable ? undefined : "暂不支持预览"}
+        draggable={draggable}
+        onDragStart={(e) => {
+          if (localPath === undefined) return;
+          e.preventDefault();
+          window.fastcut?.startFileDrag(localPath);
+        }}
+        tabIndex={previewable ? 0 : undefined}
+        onClick={() => {
+          if (isFolder) {
+            enterFolder(file);
+          } else if (isVideo) {
+            openFile(file);
+          } else {
+            toggleXhsSelect(entry.relPath);
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          toggleXhsSelect(entry.relPath);
+        }}
+        style={{
+          width: 132,
+          padding: "12px 8px 8px",
+          borderRadius: 8,
+          border: selected ? "1px solid #1677ff" : "1px solid transparent",
+          background: selected ? "#e6f4ff" : undefined,
+          cursor: draggable ? "grab" : previewable ? "pointer" : "default",
+          opacity: previewable || xhsSelected.includes(entry.relPath) ? 1 : 0.75,
+          textAlign: "center",
+          outline: "none",
+        }}
+        onMouseEnter={() => {
+          dispatch({ type: "explorer/hover", file });
+        }}
+        onMouseLeave={() => {
+          if (currentExplorer.hovered_file?.file_id === file.file_id) {
+            dispatch({ type: "explorer/hover", file: undefined });
+          }
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "1 / 1",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+            borderRadius: 6,
+          }}
+        >
+          {cornerMark}
+          {cover}
+        </div>
+        <Typography.Paragraph
+          ellipsis={{ rows: 2, tooltip: entry.name }}
+          style={{ fontSize: 12, margin: "8px 0 2px", minHeight: 32, lineHeight: "16px" }}
+        >
+          {entry.name}
+        </Typography.Paragraph>
+      </div>
+    );
+  }
+
+  const writeDisabledTip = "网盘合集为只读，仅支持浏览与下载";
+
   return (
     <div className={className} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <Space direction="vertical" style={{ width: "100%" }} size={12}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Tooltip title={isXhs ? undefined : writeDisabledTip}>
+              <Button
+                data-testid="xhs-import-btn"
+                icon={<ImportOutlined />}
+                disabled={!isXhs}
+                title={isXhs ? "粘贴小红书链接导入" : writeDisabledTip}
+                onClick={() => {
+                  setImportUrl("");
+                  setImportError("");
+                  setImportOpen(true);
+                }}
+              >
+                导入链接
+              </Button>
+            </Tooltip>
+            <Tooltip title={isXhs ? undefined : writeDisabledTip}>
+              <Button
+                data-testid="xhs-mkdir-btn"
+                icon={<FolderAddOutlined />}
+                disabled={!isXhs}
+                title={isXhs ? "在当前目录新建文件夹" : writeDisabledTip}
+                onClick={() => {
+                  setMkdirName("");
+                  setMkdirOpen(true);
+                }}
+              >
+                新建文件夹
+              </Button>
+            </Tooltip>
+            <Tooltip title={isXhs ? undefined : writeDisabledTip}>
+              <Button
+                data-testid="xhs-delete-btn"
+                icon={<DeleteOutlined />}
+                danger
+                disabled={!isXhs || xhsSelected.length === 0}
+                title={isXhs ? "删除选中" : writeDisabledTip}
+                onClick={confirmXhsDelete}
+              >
+                删除{xhsSelected.length > 0 ? `(${xhsSelected.length})` : ""}
+              </Button>
+            </Tooltip>
+            <Tooltip title={isXhs ? undefined : writeDisabledTip}>
+              <Button
+                data-testid="xhs-move-btn"
+                icon={<SwapOutlined />}
+                disabled={!isXhs || xhsSelected.length === 0}
+                title={isXhs ? "移动选中到指定目录" : writeDisabledTip}
+                onClick={() => {
+                  setMoveDest("");
+                  setMoveOpen(true);
+                }}
+              >
+                移动
+              </Button>
+            </Tooltip>
+            {isXhs && xhsSelected.length === 1 ? (
+              <Button
+                data-testid="xhs-rename-btn"
+                onClick={() => {
+                  setRenameValue(
+                    xhsSelected[0]?.split("/").pop() ?? "",
+                  );
+                  setRenameOpen(true);
+                }}
+              >
+                重命名
+              </Button>
+            ) : null}
+          </div>
           <div data-testid="explorer-breadcrumb">
             <Breadcrumb
               items={explorer.stack.map((s, idx) => ({
@@ -649,51 +1088,161 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
               }))}
             />
           </div>
-          <Spin spinning={loading} tip="加载中…">
-            {sortedItems.length === 0 && !loading ? (
-              <Typography.Text type="secondary">空文件夹</Typography.Text>
-            ) : (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignContent: "flex-start" }}>
-                {sortedItems.map((item) => (
-                  <div key={item.file_id}>{renderTile(item)}</div>
-                ))}
-              </div>
-            )}
-          </Spin>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-            {/* 滚动自动加载 sentinel：进入视口即触发 loadMore */}
-            <div ref={sentinelRef} data-testid="load-more-sentinel" style={{ height: 1, width: "100%" }} />
-            {nextMarker !== null ? (
-              loadingMore ? (
-                <Spin size="small" tip={`加载更多中…（已加载 ${items.length} 项）`}>
-                  <span />
-                </Spin>
+          {isXhs ? (
+            <Spin spinning={xhsLoading} tip="加载中…">
+              {sortedXhs.length === 0 && !xhsLoading ? (
+                <Typography.Text type="secondary">空文件夹</Typography.Text>
               ) : (
-                <Typography.Text type="secondary">
-                  上滑自动加载更多（已加载 {items.length} 项）
-                </Typography.Text>
-              )
-            ) : (
-              items.length > 0 && (
-                <Typography.Text type="secondary">已全部加载（共 {items.length} 项）</Typography.Text>
-              )
-            )}
-            {/* 手动兜底：自动加载失败时可点击；e2e 亦可沿用 data-testid="load-more" */}
-            {nextMarker !== null && !loadingMore ? (
-              <Button
-                data-testid="load-more"
-                size="small"
-                type="link"
-                onClick={() => void loadMore()}
-              >
-                手动加载更多
-              </Button>
-            ) : null}
-          </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignContent: "flex-start" }}>
+                  {sortedXhs.map((entry) => (
+                    <div key={entry.relPath}>{renderXhsTile(entry)}</div>
+                  ))}
+                </div>
+              )}
+            </Spin>
+          ) : (
+            <>
+              <Spin spinning={loading} tip="加载中…">
+                {sortedItems.length === 0 && !loading ? (
+                  <Typography.Text type="secondary">空文件夹</Typography.Text>
+                ) : (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignContent: "flex-start" }}>
+                    {sortedItems.map((item) => (
+                      <div key={item.file_id}>{renderTile(item as ExplorerFile)}</div>
+                    ))}
+                  </div>
+                )}
+              </Spin>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                {/* 滚动自动加载 sentinel：进入视口即触发 loadMore */}
+                <div ref={sentinelRef} data-testid="load-more-sentinel" style={{ height: 1, width: "100%" }} />
+                {nextMarker !== null ? (
+                  loadingMore ? (
+                    <Spin size="small" tip={`加载更多中…（已加载 ${items.length} 项）`}>
+                      <span />
+                    </Spin>
+                  ) : (
+                    <Typography.Text type="secondary">
+                      上滑自动加载更多（已加载 {items.length} 项）
+                    </Typography.Text>
+                  )
+                ) : (
+                  items.length > 0 && (
+                    <Typography.Text type="secondary">已全部加载（共 {items.length} 项）</Typography.Text>
+                  )
+                )}
+                {/* 手动兜底：自动加载失败时可点击；e2e 亦可沿用 data-testid="load-more" */}
+                {nextMarker !== null && !loadingMore ? (
+                  <Button
+                    data-testid="load-more"
+                    size="small"
+                    type="link"
+                    onClick={() => void loadMore()}
+                  >
+                    手动加载更多
+                  </Button>
+                ) : null}
+              </div>
+            </>
+          )}
         </Space>
       </div>
       {explorer.opened_file !== undefined ? <VideoPane mode="open" /> : null}
       {explorer.preview_file !== undefined ? <VideoPane mode="preview" /> : null}
+      <Modal
+        title="导入小红书链接"
+        open={importOpen}
+        confirmLoading={importConfirming}
+        okText="导入"
+        cancelText="取消"
+        onOk={() => {
+          void handleImportConfirm();
+        }}
+        onCancel={() => {
+          setImportOpen(false);
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Input
+            data-testid="xhs-url-input"
+            placeholder="粘贴小红书分享链接"
+            value={importUrl}
+            onChange={(e) => {
+              setImportUrl(e.target.value);
+            }}
+            onPressEnter={() => {
+              void handleImportConfirm();
+            }}
+          />
+          {importError !== "" ? <Typography.Text type="danger">{importError}</Typography.Text> : null}
+        </div>
+      </Modal>
+      <Modal
+        title="新建文件夹"
+        open={mkdirOpen}
+        confirmLoading={mkdirLoading}
+        okText="新建"
+        cancelText="取消"
+        onOk={() => {
+          void handleMkdirConfirm();
+        }}
+        onCancel={() => {
+          setMkdirOpen(false);
+        }}
+      >
+        <Input
+          data-testid="xhs-mkdir-input"
+          placeholder="文件夹名"
+          value={mkdirName}
+          onChange={(e) => {
+            setMkdirName(e.target.value);
+          }}
+        />
+      </Modal>
+      <Modal
+        title="移动到"
+        open={moveOpen}
+        confirmLoading={moveLoading}
+        okText="移动"
+        cancelText="取消"
+        onOk={() => {
+          void handleMoveConfirm();
+        }}
+        onCancel={() => {
+          setMoveOpen(false);
+        }}
+      >
+        <Input
+          data-testid="xhs-move-input"
+          placeholder="目标目录相对路径（空为合集根）"
+          value={moveDest}
+          onChange={(e) => {
+            setMoveDest(e.target.value);
+          }}
+        />
+      </Modal>
+      <Modal
+        title="重命名"
+        open={renameOpen}
+        confirmLoading={renameLoading}
+        okText="保存"
+        cancelText="取消"
+        onOk={() => {
+          void handleXhsRenameConfirm();
+        }}
+        onCancel={() => {
+          setRenameOpen(false);
+        }}
+      >
+        <Input
+          data-testid="xhs-rename-input"
+          placeholder="新名称"
+          value={renameValue}
+          onChange={(e) => {
+            setRenameValue(e.target.value);
+          }}
+        />
+      </Modal>
     </div>
   );
 }

@@ -16,6 +16,8 @@ import { dirname, join } from "node:path";
 
 import pLimit from "p-limit";
 
+import { toLocalMediaUrl } from "../shared/media-url.js";
+
 /** 可注入的抓取函数（net.fetch 与全局 fetch 同形；默认全局 fetch，本模块不 import electron 以便 vitest）。 */
 export type ThumbFetch = (url: string) => Promise<{
   ok: boolean;
@@ -53,9 +55,9 @@ export function cacheFilePath(userDataDir: string, shareId: string, fileId: stri
   );
 }
 
-/** 账本绝对路径 → 本地媒体协议 URL（与 VideoPane.toLocalMediaUrl 同构，main 侧复刻一份）。 */
+/** 账本绝对路径 → 本地媒体协议 URL（唯一实现见 `../shared/media-url`，此处直接复用）。 */
 export function toThumbMediaUrl(absPath: string): string {
-  return `media://file${encodeURI(absPath)}`;
+  return toLocalMediaUrl(absPath);
 }
 
 /**

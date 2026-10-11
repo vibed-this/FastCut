@@ -1,7 +1,7 @@
 /** 应用入口：浅色布局与全局初始化。 */
 import { useEffect } from "react";
 import { Alert, App as AntdApp, Empty, Layout } from "antd";
-import { getConfig, listShares } from "./api";
+import { getConfig, listCollections } from "./api";
 import { useStore } from "./store";
 import Sidebar from "./components/Sidebar";
 import FolderView from "./components/FolderView";
@@ -21,11 +21,11 @@ export default function App(): React.JSX.Element {
     let cancelled = false;
     void (async () => {
       try {
-        const [shares, cfg] = await Promise.all([listShares(), getConfig()]);
+        const [collections, cfg] = await Promise.all([listCollections(), getConfig()]);
         if (cancelled) {
           return;
         }
-        dispatch({ type: "shares/set", shares });
+        dispatch({ type: "collections/set", collections });
         dispatch({ type: "material/set", dir: cfg.target_dir ?? "" });
       } catch (e) {
         if (!cancelled) {
@@ -104,7 +104,7 @@ export default function App(): React.JSX.Element {
           ) : null}
           {explorer === null ? (
             <div style={{ padding: 48, display: "flex", justifyContent: "center" }}>
-              <Empty description="暂无打开的分享，请从左侧选择" />
+              <Empty description="暂无打开的合集，请从左侧选择" />
             </div>
           ) : (
             <FolderView />

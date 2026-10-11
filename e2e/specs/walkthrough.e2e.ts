@@ -66,7 +66,8 @@ function bridgeInvoke<T>(page: Page, channel: string, args?: unknown): Promise<T
 }
 
 interface ShareRow {
-  share_id: string;
+  id: string;
+  share_id?: string;
   name: string;
   url: string;
 }
@@ -109,11 +110,12 @@ async function discoverIds(
   smallFileId: string;
   smallFileName: string;
 }> {
-  const shares = await bridgeInvoke<ShareRow[]>(page, "list_shares", {});
+  const shares = await bridgeInvoke<ShareRow[]>(page, "collection_list", {});
   const share = shares.find((s) => s.name.includes(SHARE_TITLE_PART));
   if (!share) throw new Error("IPC 侧找不到分享");
+  const shareId = share.share_id ?? share.id;
   const root = await listShareRetry(page, {
-    shareId: share.share_id,
+    shareId,
     parentFileId: "root",
   });
   const folders = root.items.filter((i) => i.type === "folder");
@@ -124,7 +126,7 @@ async function discoverIds(
   for (const folder of folders) {
     await page.waitForTimeout(1500);
     const sub = await listShareRetry(page, {
-      shareId: share.share_id,
+      shareId,
       parentFileId: folder.file_id,
     });
     const mp4s = sub.items.filter((i) => i.name.toLowerCase().endsWith(".mp4"));
@@ -137,7 +139,7 @@ async function discoverIds(
     if (hit) {
       const s = small ?? { folder, file: hit };
       return {
-        shareId: share.share_id,
+        shareId,
         folderId: folder.file_id,
         folderName: folder.name,
         fileId: hit.file_id,
@@ -152,7 +154,7 @@ async function discoverIds(
   if (fallback) {
     const s = small ?? fallback;
     return {
-      shareId: share.share_id,
+      shareId,
       folderId: fallback.folder.file_id,
       folderName: fallback.folder.name,
       fileId: fallback.file.file_id,
@@ -166,7 +168,7 @@ async function discoverIds(
 
 /** UI 上打开分享并进入指定文件夹（单视图：点左侧分享即切换右侧内容）。 */
 async function uiOpenShareAndFolder(page: Page, folderName: string): Promise<void> {
-  const item = page.locator('[data-testid="share-item"]', { hasText: SHARE_TITLE_PART }).first();
+  const item = page.locator('[data-testid="collection-item"]', { hasText: SHARE_TITLE_PART }).first();
   await expect(item).toBeVisible({ timeout: 60_000 });
   await item.click();
   await expect(page.locator('[data-testid="explorer-breadcrumb"]').first()).toBeVisible({ timeout: 60_000 });
@@ -229,7 +231,7 @@ async function ensureInFolder(page: Page, folderName: string): Promise<void> {
   const tiles = await page.locator('[data-testid="preview-file"], [data-testid="enter-folder"]').count();
   if (tiles > 0) return;
   await page.reload();
-  await expect(page.locator('[data-testid="add-share-btn"]')).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator('[data-testid="add-collection-btn"]')).toBeVisible({ timeout: 60_000 });
   await uiOpenShareAndFolder(page, folderName);
 }
 
@@ -274,21 +276,21 @@ test.beforeAll(async () => {
   });
   win = await app.firstWindow();
   await win.setViewportSize({ width: 1440, height: 900 });
-  await expect(win.locator('[data-testid="add-share-btn"]')).toBeVisible({ timeout: 60_000 });
+  await expect(win.locator('[data-testid="add-collection-btn"]')).toBeVisible({ timeout: 60_000 });
 });
 
 test.afterAll(async () => {
   await app?.close().catch(() => undefined);
 });
 
-test("a. 加分享：侧栏出现红星日常素材", async () => {
-  const existing = await win.locator('[data-testid="share-item"]').count();
+test("a. 新建合集：侧栏出现红星日常素材", async () => {
+  const existing = await win.locator('[data-testid="collection-item"]').count();
   if (existing === 0) {
-    await win.locator('[data-testid="add-share-btn"]').click();
-    await win.locator('[data-testid="share-url-input"]').fill(SHARE_URL);
-    await win.locator('[data-testid="add-share-confirm"]').click();
+    await win.locator('[data-testid="add-collection-btn"]').click();
+    await win.locator('[data-testid="collection-url-input"]').fill(SHARE_URL);
+    await win.locator('[data-testid="add-collection-confirm"]').click();
   }
-  const item = win.locator('[data-testid="share-item"]', { hasText: SHARE_TITLE_PART }).first();
+  const item = win.locator('[data-testid="collection-item"]', { hasText: SHARE_TITLE_PART }).first();
   await expect(item).toBeVisible({ timeout: 90_000 });
   await win.screenshot({ path: join(SHOTS, "01-share-added.png") });
 });
@@ -356,7 +358,7 @@ test("c. 预览：readyState>=2 且无过期告警", async () => {
 test("f. 样式验收：antd 主按钮为蓝色且浅色 UI 正常", async () => {
   // antd v6 主色 #1677ff；CSS 生效是“无抽取/无裸奔”的直接证据
   const bg = await win.evaluate(() => {
-    const el = document.querySelector('[data-testid="add-share-btn"]');
+    const el = document.querySelector('[data-testid="add-collection-btn"]');
     if (!el) return "missing";
     return getComputedStyle(el).backgroundColor;
   });
@@ -375,7 +377,7 @@ test("d. 设目标目录并保存：download-done ok 且 mp4 可播放", async (
   const cfg = await bridgeInvoke<{ target_dir?: string }>(win, "get_config", {});
   expect(cfg.target_dir).toBe(targetDir);
   await win.reload();
-  await expect(win.locator('[data-testid="add-share-btn"]')).toBeVisible({ timeout: 60_000 });
+  await expect(win.locator('[data-testid="add-collection-btn"]')).toBeVisible({ timeout: 60_000 });
   await uiOpenShareAndFolder(win, ctx.folderName);
   await uiLoadAll(win);
   await uiPreviewFile(win, ctx.smallFileName);

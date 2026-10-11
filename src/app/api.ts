@@ -10,7 +10,6 @@ import type {
   IpcResult,
   ListShareResult,
   PickPreviewResult,
-  SavedShare,
   SetConfigInput,
   ShareMeta,
   StatusQueryResult,
@@ -30,8 +29,6 @@ export type {
   ListShareResult,
   PickPreviewResult,
   PreviewTemplate,
-  SavedShare,
-  SetConfigInput,
   ShareItem,
   ShareItemType,
   ShareMeta,
@@ -40,14 +37,139 @@ export type {
   VideoPreview,
 } from "../../electron/shared/contract";
 
-// ---- 传输层：经 preload 桥 window.fastcut 调用 main（Wave 3 接线） ----
+// ---- 合集模型（M4：SavedShare → Collection 改名） ----
+
+/** 合集类型：阿里云盘分享 / 小红书本地合集。 */
+export type CollectionKind = "alipan" | "xiaohongshu";
+
+/** 合集：新后端 collection_* 形状；兼容旧后端 list_shares 形状（share_id）。 */
+export interface Collection {
+  collection_id: string;
+  kind: CollectionKind;
+  name: string;
+  url?: string | null;
+  pwd?: string | null;
+  added_at: number;
+  /** 小红书合集根目录（相对 target_dir，如 collections/foo-abc123）；alipan 为空。 */
+  relDir?: string;
+}
+
+/** 后端原始合集（新形状或旧 SavedShare 形状），映射前用。 */
+type RawCollection = Record<string, unknown>;
+
+/** 后端原始条目 → Collection（新旧兼容：新后端用 id/created_at）。 */
+function toCollection(raw: RawCollection): Collection {
+  const collection_id =
+    typeof raw["collection_id"] === "string"
+      ? (raw["collection_id"] as string)
+      : typeof raw["id"] === "string"
+        ? (raw["id"] as string)
+        : typeof raw["share_id"] === "string"
+          ? (raw["share_id"] as string)
+          : "";
+  const kindRaw = raw["kind"];
+  const kind: CollectionKind = kindRaw === "xiaohongshu" ? "xiaohongshu" : "alipan";
+  const name = typeof raw["name"] === "string" ? (raw["name"] as string) : "";
+  const url = typeof raw["url"] === "string" ? (raw["url"] as string) : null;
+  const pwd =
+    typeof raw["pwd"] === "string" ? (raw["pwd"] as string) : null;
+  const added_at =
+    typeof raw["added_at"] === "number"
+      ? (raw["added_at"] as number)
+      : typeof raw["created_at"] === "number"
+        ? (raw["created_at"] as number)
+        : 0;
+  const relDir =
+    typeof raw["relDir"] === "string"
+      ? (raw["relDir"] as string)
+      : typeof raw["rel_dir"] === "string"
+        ? (raw["rel_dir"] as string)
+        : undefined;
+  return { collection_id, kind, name, url, pwd, added_at, relDir };
+}
+
+// ---- 本地文件 / 小红书模型 ----
+
+/** 本地文件条目（fs_list 返回，relPath 相对 target_dir）。 */
+export interface FsEntry {
+  relPath: string;
+  name: string;
+  isDir: boolean;
+  size?: number;
+  absPath?: string;
+  mtime?: number;
+}
+
+/** xhs 链接解析回显。 */
+export interface XhsParseResult {
+  title: string;
+  cover?: string;
+  author?: string;
+  url: string;
+}
+
+/** xhs 导入返回（落盘相对路径等，后端字段原样透传）。 */
+export interface XhsImportResult {
+  relPath?: string;
+  count?: number;
+}
+
+// ---- 传输层：经 preload 桥 window.fastcut 调用 main ----
 
 function invoke<C extends IpcChannel>(channel: C, args?: IpcParams[C]): Promise<IpcResult[C]> {
   const bridge = window.fastcut;
   if (bridge === undefined || typeof bridge.invoke !== "function") {
-    throw new Error(`fastcut bridge unavailable, cannot invoke "${channel}" (Wave 3)`);
+    throw new Error(`fastcut bridge unavailable, cannot invoke "${channel}"`);
   }
   return bridge.invoke(channel, args);
+}
+
+/** 无类型约束的原始调用（新 channel 后端尚未注册时抛错，由兼容层捕获回退）。 */
+function invokeRaw<T>(channel: string, args?: unknown): Promise<T> {
+  const bridge = window.fastcut;
+  if (bridge === undefined || typeof bridge.invoke !== "function") {
+    throw new Error(`fastcut bridge unavailable, cannot invoke "${channel}"`);
+  }
+  const fn = bridge.invoke as (c: string, a?: unknown) => Promise<T>;
+  return fn(channel, args);
+}
+
+/** 是否为“新 channel 未注册”类错误（此时才允许回退旧 channel）。 */
+function isMissingHandlerError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return (
+    msg.includes("No handler") ||
+    msg.includes("no handler") ||
+    msg.includes("unknown channel") ||
+    msg.includes("UNKNOWN") ||
+    msg.includes("not registered") ||
+    msg.includes("not found")
+  );
+}
+
+/**
+ * 接口 mismatch 兜底：优先调新 channel，失败（未注册类错误）回退旧 channel。
+ *
+ * @param newChannel - 新 channel 名
+ * @param newArgs - 新入参
+ * @param oldChannel - 旧 channel 名（无旧等价时省略，错误直接上抛）
+ * @param oldArgs - 旧入参
+ * @returns 后端返回
+ */
+async function invokeCompat<T>(
+  newChannel: string,
+  newArgs: unknown,
+  oldChannel?: IpcChannel,
+  oldArgs?: unknown,
+): Promise<T> {
+  try {
+    return await invokeRaw<T>(newChannel, newArgs);
+  } catch (e) {
+    if (oldChannel !== undefined && isMissingHandlerError(e)) {
+      return (await invoke(oldChannel, oldArgs as never)) as unknown as T;
+    }
+    throw e;
+  }
 }
 
 function listen<K extends "download-progress" | "download-done">(
@@ -58,7 +180,7 @@ function listen<K extends "download-progress" | "download-done">(
 ): Promise<UnlistenFn> {
   const bridge = window.fastcut;
   if (bridge === undefined) {
-    throw new Error(`fastcut bridge unavailable, cannot listen "${event}" (Wave 3)`);
+    throw new Error(`fastcut bridge unavailable, cannot listen "${event}"`);
   }
   if (event === "download-progress") {
     const off = bridge.onDownloadProgress(handler as (payload: DownloadProgressPayload) => void);
@@ -68,23 +190,53 @@ function listen<K extends "download-progress" | "download-done">(
   return Promise.resolve(off);
 }
 
-// ---- 命令封装 ----
+// ---- 合集命令（新名优先，旧名回退） ----
 
-export function listShares(): Promise<SavedShare[]> {
-  return invoke("list_shares", {});
+export async function listCollections(): Promise<Collection[]> {
+  const raw = await invokeRaw<RawCollection[] | { items?: RawCollection[] }>("collection_list", {});
+  const arr = Array.isArray(raw) ? raw : (raw.items ?? []);
+  return arr.map(toCollection);
 }
 
-export function addShare(url: string, pwd?: string): Promise<SavedShare> {
-  return invoke("add_share", { url, pwd });
+/** 新建云盘合集（链接+密码）。 */
+export function addCollection(kind: "alipan", args: { url: string; pwd?: string }): Promise<Collection>;
+/** 新建小红书合集（合集名）。 */
+export function addCollection(kind: "xiaohongshu", args: { name: string }): Promise<Collection>;
+export async function addCollection(
+  kind: CollectionKind,
+  args: { url?: string; pwd?: string; name?: string },
+): Promise<Collection> {
+  if (kind === "alipan") {
+    const url = args.url ?? "";
+    const pwd = args.pwd;
+    const raw = await invokeRaw<RawCollection>("collection_add", { kind, url, pwd });
+    return toCollection(raw);
+  }
+  const name = (args.name ?? "").trim();
+  if (name === "") throw new Error("请输入合集名");
+  const raw = await invokeRaw<RawCollection>("collection_add", { kind, name });
+  return toCollection(raw);
 }
 
-export function renameShare(share_id: string, name: string): Promise<SavedShare> {
-  return invoke("rename_share", { shareId: share_id, name });
+export async function renameCollection(collection_id: string, name: string): Promise<Collection> {
+  const raw = await invokeRaw<RawCollection>("collection_rename", {
+    id: collection_id,
+    collectionId: collection_id,
+    collection_id,
+    name,
+  });
+  return toCollection(raw);
 }
 
-export function removeShare(share_id: string): Promise<void> {
-  return invoke("remove_share", { shareId: share_id });
+export async function removeCollection(collection_id: string): Promise<void> {
+  await invokeRaw<void>("collection_remove", {
+    id: collection_id,
+    collectionId: collection_id,
+    collection_id,
+  });
 }
+
+// ---- 阿里云盘只读命令（沿用旧 channel，参数名不变） ----
 
 export function getShareMeta(share_id: string, pwd?: string): Promise<ShareMeta> {
   return invoke("get_share_meta", { shareId: share_id, pwd });
@@ -187,6 +339,120 @@ export function downloadVideo(
     template: template ?? "",
     subDir: sub_dir ?? "",
   });
+}
+
+// ---- 本地文件命令（fs_*，relDir/relPath 相对 target_dir） ----
+
+function toFsEntries(raw: unknown): FsEntry[] {
+  const arr: unknown[] = Array.isArray(raw)
+    ? raw
+    : typeof raw === "object" && raw !== null
+      ? ((raw as Record<string, unknown>)["entries"] as unknown[] ??
+        (raw as Record<string, unknown>)["items"] as unknown[] ??
+        [])
+      : [];
+  const out: FsEntry[] = [];
+  for (const e of arr) {
+    if (typeof e !== "object" || e === null) continue;
+    const r = e as Record<string, unknown>;
+    const relPath =
+      typeof r["relPath"] === "string"
+        ? (r["relPath"] as string)
+        : typeof r["rel_path"] === "string"
+          ? (r["rel_path"] as string)
+          : typeof r["file_id"] === "string"
+            ? (r["file_id"] as string)
+            : "";
+    const name =
+      typeof r["name"] === "string" ? (r["name"] as string) : relPath.split("/").pop() ?? relPath;
+    const isDir =
+      typeof r["isDir"] === "boolean"
+        ? (r["isDir"] as boolean)
+        : typeof r["is_dir"] === "boolean"
+          ? (r["is_dir"] as boolean)
+          : r["type"] === "folder";
+    const size = typeof r["size"] === "number" ? (r["size"] as number) : undefined;
+    const absPath = typeof r["absPath"] === "string" ? (r["absPath"] as string) : undefined;
+    const mtime = typeof r["mtime"] === "number" ? (r["mtime"] as number) : undefined;
+    out.push({ relPath, name, isDir, size, absPath, mtime });
+  }
+  return out;
+}
+
+export async function fsList(relDir = ""): Promise<FsEntry[]> {
+  const raw = await invokeCompat<unknown>("fs_list", { relDir, rel_dir: relDir });
+  return toFsEntries(raw);
+}
+
+export async function fsMkdir(relDir: string, name: string): Promise<void> {
+  const clean = name.trim();
+  // 后端 fs_mkdir 入参为完整新目录路径（相对 target_dir），此处拼接父目录+单段名。
+  const full = relDir.trim() === "" ? clean : `${relDir.replace(/\/+$/, "")}/${clean}`;
+  await invokeCompat<void>("fs_mkdir", { relDir: full, rel_dir: full, name: clean });
+}
+
+export async function fsRename(relPath: string, newName: string): Promise<void> {
+  await invokeCompat<void>("fs_rename", {
+    relPath,
+    rel_path: relPath,
+    newName,
+    name: newName,
+  });
+}
+
+export async function fsMove(srcRelPath: string, destDir: string): Promise<void> {
+  await invokeCompat<void>("fs_move", {
+    srcRelPath,
+    src_rel_path: srcRelPath,
+    relPath: srcRelPath,
+    destDir,
+    dest_dir: destDir,
+  });
+}
+
+export async function fsRemove(relPath: string): Promise<void> {
+  await invokeCompat<void>("fs_remove", { relPath, rel_path: relPath });
+}
+
+// ---- 小红书命令（xhs_*） ----
+
+export async function xhsParse(url: string): Promise<XhsParseResult> {
+  const raw = await invokeRaw<Record<string, unknown>>("xhs_parse", { url });
+  return {
+    title: typeof raw["title"] === "string" ? (raw["title"] as string) : "",
+    cover: typeof raw["cover"] === "string" ? (raw["cover"] as string) : undefined,
+    author: typeof raw["author"] === "string" ? (raw["author"] as string) : undefined,
+    url,
+  };
+}
+
+export async function xhsImport(
+  url: string,
+  opts?: { collectionId?: string; relDir?: string },
+): Promise<XhsImportResult> {
+  // 契约入参为 {url, collectionId, subDir?, fileName?}，返回 "started"/"downloading" 字符串。
+  const subDir = opts?.relDir ?? "";
+  const raw = await invokeRaw<unknown>("xhs_import", {
+    url,
+    collectionId: opts?.collectionId,
+    collection_id: opts?.collectionId,
+    subDir,
+    sub_dir: subDir,
+    relDir: subDir,
+    rel_dir: subDir,
+  });
+  if (typeof raw === "string") return {};
+  if (typeof raw !== "object" || raw === null) return {};
+  const r = raw as Record<string, unknown>;
+  return {
+    relPath:
+      typeof r["relPath"] === "string"
+        ? (r["relPath"] as string)
+        : typeof r["rel_path"] === "string"
+          ? (r["rel_path"] as string)
+          : undefined,
+    count: typeof r["count"] === "number" ? (r["count"] as number) : undefined,
+  };
 }
 
 export function getConfig(): Promise<AppConfig> {

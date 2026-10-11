@@ -1,14 +1,15 @@
 /**
- * store.ts 的 vitest 测试：Rust `store.rs #[cfg(test)]` 用例的直译 +
- * 落盘 roundtrip + 旧数据迁移。全部以临时目录充当 userDataDir。
+ * store.ts 的 vitest 测试：URL 解析、配置落盘、合集增删改、
+ * 小红书合集磁盘联动、落盘 roundtrip 与旧数据迁移。
+ * 全部以临时目录充当 userDataDir。
  */
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir, stat } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  addShare,
+  addCollection,
   extractShareId,
   getConfig,
   getIsDownloadingProvider,
@@ -16,13 +17,13 @@ import {
   getStatusBatch,
   ledgerKey,
   legacyStorePath,
-  listShares,
+  listCollections,
   normalizeDefinition,
   nowSecs,
   parseShareUrl,
   recordLedger,
-  removeShare,
-  renameShare,
+  removeCollection,
+  renameCollection,
   setConfig,
   setIsDownloadingProvider,
   STORE_FILE,
@@ -71,7 +72,7 @@ describe("ledgerKey", () => {
   });
 });
 
-describe("parseShareUrl / extractShareId（Rust tests 直译）", () => {
+describe("parseShareUrl / extractShareId", () => {
   it("取 /s/ 后第一段为 share_id", () => {
     const url = parseShareUrl("https://www.alipan.com/s/wDtnwT8ErHW/folder/abc");
     expect(extractShareId(url)).toBe("wDtnwT8ErHW");
@@ -112,7 +113,7 @@ describe("parseShareUrl / extractShareId（Rust tests 直译）", () => {
     expect(extractShareId(parseShareUrl("  https://www.alipan.com/s/trimmed  "))).toBe("trimmed");
   });
 
-  it("host 大小写不敏感，scheme 大小写仍拒绝（与 Rust strip_prefix 一致）", () => {
+  it("host 大小写不敏感，scheme 大小写仍拒绝", () => {
     expect(extractShareId(parseShareUrl("https://WWW.ALIPAN.COM/s/abc"))).toBe("abc");
     expect(() => parseShareUrl("HTTPS://www.alipan.com/s/abc")).toThrow(
       "链接须以 http(s):// 开头",
@@ -150,79 +151,157 @@ describe("config 落盘 roundtrip", () => {
     );
   });
 
-  it("缺省 target_dir 落盘写 null（与 serde Option::None 一致）", async () => {
+  it("缺省 target_dir 落盘写 null", async () => {
     await setConfig(dir, { definition: "SD" });
     const raw = await readRaw();
     expect(raw["config"]).toEqual({ target_dir: null, definition: "SD" });
   });
 });
 
-describe("shares 增删改", () => {
+describe("collections 增删改（alipan）", () => {
   const fetchShareName = vi.fn(async (shareId: string) => `分享-${shareId}`);
 
   beforeEach(() => fetchShareName.mockClear());
 
-  it("addShare 新链接调元信息并落盘整数 added_at", async () => {
+  it("addCollection 新链接调元信息并落盘整数 created_at", async () => {
     const before = nowSecs();
-    const item = await addShare(dir, "https://www.alipan.com/s/wDtnwT8ErHW", undefined, {
-      fetchShareName,
-    });
+    const item = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/wDtnwT8ErHW" },
+      { fetchShareName },
+    );
     expect(fetchShareName).toHaveBeenCalledWith("wDtnwT8ErHW", undefined);
+    expect(item.id).toBe("wDtnwT8ErHW");
+    expect(item.kind).toBe("alipan");
     expect(item.share_id).toBe("wDtnwT8ErHW");
     expect(item.name).toBe("分享-wDtnwT8ErHW");
     expect(item.url).toBe("https://www.alipan.com/s/wDtnwT8ErHW");
-    expect(Number.isInteger(item.added_at)).toBe(true);
-    expect(item.added_at).toBeGreaterThanOrEqual(before);
+    expect(Number.isInteger(item.created_at)).toBe(true);
+    expect(item.created_at).toBeGreaterThanOrEqual(before);
     expect(item.pwd).toBeUndefined();
 
     const raw = await readRaw();
-    const shares = raw["shares"] as Array<Record<string, unknown>>;
-    expect(shares).toHaveLength(1);
-    expect(shares[0]).toEqual({
+    const collections = raw["collections"] as Array<Record<string, unknown>>;
+    expect(collections).toHaveLength(1);
+    expect(collections[0]).toEqual({
+      id: "wDtnwT8ErHW",
+      kind: "alipan",
+      name: "分享-wDtnwT8ErHW",
+      created_at: item.created_at,
       share_id: "wDtnwT8ErHW",
       url: "https://www.alipan.com/s/wDtnwT8ErHW",
-      name: "分享-wDtnwT8ErHW",
       pwd: null,
-      added_at: item.added_at,
+      relDir: null,
     });
-    await expect(listShares(dir)).resolves.toEqual([item]);
+    await expect(listCollections(dir)).resolves.toEqual([item]);
   });
 
-  it("addShare 已存在 share_id 直接返回旧记录且不再请求元信息", async () => {
-    const first = await addShare(dir, "https://www.alipan.com/s/dup1", "pw", { fetchShareName });
+  it("addCollection 已存在 id 直接返回旧记录且不再请求元信息", async () => {
+    const first = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/dup1", pwd: "pw" },
+      { fetchShareName },
+    );
     fetchShareName.mockClear();
     const boom = vi.fn(async () => {
       throw new Error("must not be called");
     });
-    const second = await addShare(dir, "https://www.alipan.com/s/dup1/other", undefined, {
-      fetchShareName: boom,
-    });
+    const second = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/dup1/other" },
+      { fetchShareName: boom },
+    );
     expect(boom).not.toHaveBeenCalled();
     expect(second).toEqual(first);
     expect(fetchShareName).not.toHaveBeenCalled();
   });
 
-  it("addShare 空白 pwd 按无密码处理", async () => {
-    const item = await addShare(dir, "https://www.alipan.com/s/nopwd", "   ", { fetchShareName });
+  it("addCollection 空白 pwd 按无密码处理", async () => {
+    const item = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/nopwd", pwd: "   " },
+      { fetchShareName },
+    );
     expect(item.pwd).toBeUndefined();
     expect(fetchShareName).toHaveBeenCalledWith("nopwd", undefined);
   });
 
-  it("renameShare 空名 / 不存在报错", async () => {
-    await addShare(dir, "https://www.alipan.com/s/r1", undefined, { fetchShareName });
-    await expect(renameShare(dir, "r1", "   ")).rejects.toThrow("名称不能为空");
-    await expect(renameShare(dir, "missing", "x")).rejects.toThrow("分享不存在");
-    const renamed = await renameShare(dir, "r1", "  新名  ");
+  it("renameCollection 空名 / 不存在报错", async () => {
+    await addCollection(dir, { kind: "alipan", url: "https://www.alipan.com/s/r1" }, { fetchShareName });
+    await expect(renameCollection(dir, "r1", "   ")).rejects.toThrow("名称不能为空");
+    await expect(renameCollection(dir, "missing", "x")).rejects.toThrow("合集不存在");
+    const renamed = await renameCollection(dir, "r1", "  新名  ");
     expect(renamed.name).toBe("新名");
-    await expect(listShares(dir)).resolves.toEqual([renamed]);
+    await expect(listCollections(dir)).resolves.toEqual([renamed]);
   });
 
-  it("removeShare 不存在报错，删除后列表为空", async () => {
-    await expect(removeShare(dir, "nope")).rejects.toThrow("分享不存在");
-    await addShare(dir, "https://www.alipan.com/s/del1", undefined, { fetchShareName });
-    await removeShare(dir, "del1");
-    await expect(listShares(dir)).resolves.toEqual([]);
-    await expect(removeShare(dir, "del1")).rejects.toThrow("分享不存在");
+  it("removeCollection 不存在报错，删除后列表为空", async () => {
+    await expect(removeCollection(dir, "nope")).rejects.toThrow("合集不存在");
+    await addCollection(dir, { kind: "alipan", url: "https://www.alipan.com/s/del1" }, { fetchShareName });
+    await removeCollection(dir, "del1");
+    await expect(listCollections(dir)).resolves.toEqual([]);
+    await expect(removeCollection(dir, "del1")).rejects.toThrow("合集不存在");
+  });
+});
+
+describe("collections（xiaohongshu，磁盘联动）", () => {
+  let target = "";
+
+  beforeEach(async () => {
+    target = await mkdtemp(join(tmpdir(), "fastcut-target-"));
+    await setConfig(dir, { target_dir: target });
+  });
+
+  afterEach(async () => {
+    await rm(target, { recursive: true, force: true });
+  });
+
+  it("addCollection 无 target_dir 抛错", async () => {
+    const bare = await mkdtemp(join(tmpdir(), "fastcut-nodir-"));
+    try {
+      await expect(addCollection(bare, { kind: "xiaohongshu", name: "旅行" })).rejects.toThrow(
+        "未配置目标文件夹",
+      );
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it("addCollection 建 collections/<slug>/ 目录并记录 relDir", async () => {
+    const item = await addCollection(dir, { kind: "xiaohongshu", name: "旅行" });
+    expect(item.kind).toBe("xiaohongshu");
+    expect(item.name).toBe("旅行");
+    expect(item.id.startsWith("xhs_")).toBe(true);
+    expect(item.relDir).toMatch(/^collections\/.+/);
+    await expect(stat(join(target, item.relDir as string))).resolves.toBeTruthy();
+    await expect(listCollections(dir)).resolves.toEqual([item]);
+  });
+
+  it("addCollection 空名抛错", async () => {
+    await expect(addCollection(dir, { kind: "xiaohongshu", name: "   " })).rejects.toThrow(
+      "名称不能为空",
+    );
+  });
+
+  it("renameCollection 重命名磁盘文件夹并更新 relDir", async () => {
+    const item = await addCollection(dir, { kind: "xiaohongshu", name: "旧名" });
+    const oldRel = item.relDir as string;
+    const renamed = await renameCollection(dir, item.id, "新名");
+    expect(renamed.name).toBe("新名");
+    expect(renamed.relDir).not.toBe(oldRel);
+    expect(renamed.relDir as string).toContain("新名");
+    // 短 id 后缀保持稳定
+    expect((renamed.relDir as string).split("-").pop()).toBe(oldRel.split("-").pop());
+    await expect(stat(join(target, renamed.relDir as string))).resolves.toBeTruthy();
+  });
+
+  it("removeCollection 连带删除磁盘文件夹", async () => {
+    const item = await addCollection(dir, { kind: "xiaohongshu", name: "待删" });
+    const rel = item.relDir as string;
+    await writeFile(join(target, rel, "note.txt"), "x");
+    await removeCollection(dir, item.id);
+    await expect(listCollections(dir)).resolves.toEqual([]);
+    await expect(stat(join(target, rel))).rejects.toThrow();
   });
 });
 
@@ -322,12 +401,14 @@ describe("旧数据迁移", () => {
         target_dir: "/old/dir",
         definition: "HD",
       });
-      await expect(listShares(dir)).resolves.toEqual([
+      await expect(listCollections(dir)).resolves.toEqual([
         {
+          id: "olds",
+          kind: "alipan",
+          name: "旧分享",
+          created_at: 1700000001,
           share_id: "olds",
           url: "https://www.alipan.com/s/olds",
-          name: "旧分享",
-          added_at: 1700000001,
         },
       ]);
       // 已拷贝到新位置
@@ -337,12 +418,30 @@ describe("旧数据迁移", () => {
     }
   });
 
+  it("旧 shares 落盘读出即迁移为 collections（id 复用 share_id）", async () => {
+    await writeFile(
+      storeFile(),
+      JSON.stringify({
+        config: { target_dir: null, definition: "AUTO" },
+        ledger: {},
+        shares: [
+          { share_id: "a1", url: "https://www.alipan.com/s/a1", name: "A", pwd: "p", added_at: 11 },
+          { share_id: "b2", url: "https://www.alipan.com/s/b2", name: "B", pwd: null, added_at: 22 },
+        ],
+      }),
+    );
+    await expect(listCollections(dir)).resolves.toEqual([
+      { id: "a1", kind: "alipan", name: "A", created_at: 11, share_id: "a1", url: "https://www.alipan.com/s/a1", pwd: "p" },
+      { id: "b2", kind: "alipan", name: "B", created_at: 22, share_id: "b2", url: "https://www.alipan.com/s/b2" },
+    ]);
+  });
+
   it("无旧文件时静默用空数据", async () => {
     const fakeHome = await mkdtemp(join(tmpdir(), "fastcut-emptyhome-"));
     try {
       process.env["HOME"] = fakeHome;
       await expect(getConfig(dir)).resolves.toEqual({ definition: "AUTO" });
-      await expect(listShares(dir)).resolves.toEqual([]);
+      await expect(listCollections(dir)).resolves.toEqual([]);
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }
@@ -356,7 +455,7 @@ describe("旧数据迁移", () => {
       await mkdir(legacyDir, { recursive: true });
       await writeFile(join(legacyDir, STORE_FILE), "not-json{{{");
       await expect(getConfig(dir)).resolves.toEqual({ definition: "AUTO" });
-      await expect(listShares(dir)).resolves.toEqual([]);
+      await expect(listCollections(dir)).resolves.toEqual([]);
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
     }

@@ -22,8 +22,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { createWriteStream, existsSync } from "node:fs";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import * as path from "node:path";
 import pLimit from "p-limit";
@@ -32,6 +32,7 @@ import type {
   DownloadDonePayload,
   DownloadProgressPayload,
 } from "../shared/contract.js";
+import { sanitizeTitle } from "./xhs-client.js";
 import { sanitizeSegment } from "./share-api.js";
 import { getConfig, ledgerKey, recordLedger } from "./store.js";
 
@@ -524,6 +525,297 @@ export async function downloadVideo(opts: DownloadVideoOptions): Promise<string>
     },
   ).finally(() => {
     inFlight.delete(key);
+  });
+  return "started";
+}
+
+// ---------------------------------------------------------------------------
+// 小红书直链下载（M3，仅视频期）
+// ---------------------------------------------------------------------------
+
+/** 小红书 sidecar `.meta.json` 落盘形状。 */
+export interface XhsSidecar {
+  source: "xiaohongshu";
+  note_id: string;
+  source_url: string;
+  title: string;
+  author: string;
+  cover: string;
+  video_url: string;
+  file: string;
+  downloaded_at: number;
+  kind: "video";
+}
+
+/** `downloadXhsDirect` 的 meta 入参（note/author/cover 的透传包）。 */
+export interface XhsMetaInput {
+  noteId?: string;
+  note_id?: string;
+  author?: string;
+  cover?: string;
+  title?: string;
+  source_url?: string;
+  video_url?: string;
+}
+
+/**
+ * `downloadXhsDirect` 入参：直链 MP4 分支。
+ * - `relDir` 为落盘目录相对 `target_dir` 的完整路径（调用方由合集 relDir + 子目录算好传入，优先使用）；
+ *   缺省时回退旧语义：`collectionId` 为合集 slug，落盘到 `<target_dir>/collections/<slug>/`；
+ * - `subDir` 仅在回退语义下拼到合集目录下（`resolve_target_dir` 语义），`relDir` 存在时忽略；
+ * - `fileName` / `title` 决定文件名（`sanitizeTitle` 清洗，无后缀自动补 `.mp4`）；
+ * - `meta` + `noteId` / `author` / `cover` / `sourceUrl` 写入同名 sidecar；
+ * - `fetchFn` 可注入（单测 mock），默认全局 `fetch`。
+ */
+export interface DownloadXhsDirectOptions {
+  downloadUrl: string;
+  collectionId: string;
+  relDir?: string;
+  subDir?: string;
+  fileName?: string;
+  title?: string;
+  meta?: XhsMetaInput;
+  noteId?: string;
+  author?: string;
+  cover?: string;
+  sourceUrl?: string;
+  userDataDir: string;
+  emit: (event: "download-progress" | "download-done", payload: unknown) => void;
+  recordLedger?: (
+    userDataDir: string,
+    shareId: string,
+    fileId: string,
+    entry: LedgerEntryInput,
+  ) => Promise<void>;
+  fetchFn?: typeof fetch;
+}
+
+/** 小红书下载的进行中集合（key 见 `xhsInFlightKey`）。 */
+const xhsInFlight = new Set<string>();
+
+/** 防重入 key：`xhs:<collectionId>:<basename>`（basename 为清洗后的 stem）。 */
+export function xhsInFlightKey(collectionId: string, basename: string): string {
+  return `xhs:${collectionId}:${basename}`;
+}
+
+export function isXhsDownloading(collectionId: string, basename: string): boolean {
+  return xhsInFlight.has(xhsInFlightKey(collectionId, basename));
+}
+
+/** 清空小红书在飞集合（单测隔离用）。 */
+export function clearXhsInFlight(): void {
+  xhsInFlight.clear();
+}
+
+function xhsStemOf(opts: DownloadXhsDirectOptions): string {
+  const raw = (opts.fileName ?? opts.title ?? opts.noteId ?? "").trim().replace(/\.mp4$/i, "");
+  const stem = sanitizeTitle(raw === "" ? "xhs-video" : raw);
+  return stem;
+}
+
+function xhsMetaOf(opts: DownloadXhsDirectOptions): {
+  noteId: string;
+  author: string;
+  cover: string;
+} {
+  const noteId =
+    opts.noteId ?? opts.meta?.noteId ?? opts.meta?.note_id ?? "";
+  const author = opts.author ?? opts.meta?.author ?? "";
+  const cover = opts.cover ?? opts.meta?.cover ?? "";
+  return { noteId, author, cover };
+}
+
+async function fetchXhsOnce(
+  fetchFn: typeof fetch,
+  url: string,
+  what: string,
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetchFn(url, { signal: ctrl.signal });
+  } catch (e) {
+    const timeout =
+      (e instanceof DOMException && e.name === "AbortError") ||
+      (e instanceof Error && e.name === "AbortError");
+    throw new FetchFailed(
+      false,
+      `${what}${timeout ? "请求超时" : "网络错误"}：${errText(e)}`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (resp.ok) return resp;
+  if (resp.status >= 400 && resp.status < 500) {
+    throw new FetchFailed(true, `${what}请求被拒（HTTP ${resp.status}）`);
+  }
+  throw new FetchFailed(false, `${what}服务端异常（HTTP ${resp.status}）`);
+}
+
+async function fetchXhsWithRetry(
+  fetchFn: typeof fetch,
+  url: string,
+  what: string,
+): Promise<Response> {
+  let last: FetchFailed = new FetchFailed(false, "");
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(500 * (attempt - 1));
+    try {
+      return await fetchXhsOnce(fetchFn, url, what);
+    } catch (e) {
+      if (!(e instanceof FetchFailed)) throw e;
+      last = e;
+    }
+  }
+  throw last;
+}
+
+/** 对应 `run_pipeline` 的小红书直链版：流式写盘 + sidecar + 记账。 */
+async function run_xhs_pipeline(
+  opts: DownloadXhsDirectOptions,
+  key: string,
+  stem: string,
+): Promise<string> {
+  const collection = opts.collectionId.trim();
+  const fetchFn = opts.fetchFn ?? fetch;
+  const what = "小红书视频";
+
+  const dirRaw = await readTargetDir(opts.userDataDir);
+  // relDir（合集 relDir + 子目录的完整相对路径）优先；缺省回退 collectionId 拼装（兼容旧单测）。
+  const dir =
+    opts.relDir !== undefined && opts.relDir.trim() !== ""
+      ? resolve_target_dir(dirRaw, opts.relDir)
+      : (() => {
+          const collectionDir = path.join(dirRaw, "collections", sanitizeSegment(collection));
+          return resolve_target_dir(collectionDir, opts.subDir ?? "");
+        })();
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (e) {
+    throw new Error(`目标文件夹创建失败：${errText(e)}`);
+  }
+  const outPath = unique_mp4_path(dir, `${stem}.mp4`);
+  const basename = path.basename(outPath);
+
+  let resp: Response;
+  try {
+    resp = await fetchXhsWithRetry(fetchFn, opts.downloadUrl, what);
+  } catch (e) {
+    if (e instanceof FetchFailed && e.expired) {
+      throw new Error(`${e.detail} EXPIRED：签名可能已过期，请重取链接后重试`);
+    }
+    throw new Error(e instanceof FetchFailed ? e.detail : errText(e));
+  }
+  const totalRaw = resp.headers.get("content-length");
+  const total = totalRaw !== null && /^\d+$/.test(totalRaw.trim()) ? Number(totalRaw.trim()) : 0;
+
+  const fileId = key;
+  let done = 0;
+  const body = resp.body;
+  if (body === null) {
+    // 无流主体时退化为整包读取（仍发一次进度）。
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (buf.length === 0) throw new Error("下载内容为空，下载中止");
+    await writeFile(outPath, buf);
+    done = buf.length;
+    const payload: DownloadProgressPayload = { file_id: fileId, done, total: total || done };
+    opts.emit("download-progress", payload);
+  } else {
+    await new Promise<void>((resolve, reject) => {
+      const stream = createWriteStream(outPath);
+      stream.on("error", (e: Error) => {
+        reject(e);
+      });
+      stream.on("finish", () => {
+        resolve();
+      });
+      void (async () => {
+        try {
+          for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+            const buf = Buffer.from(chunk);
+            if (buf.length === 0) continue;
+            if (!stream.write(buf)) {
+              await new Promise<void>((r) => stream.once("drain", r));
+            }
+            done += buf.length;
+            const payload: DownloadProgressPayload = { file_id: fileId, done, total };
+            opts.emit("download-progress", payload);
+          }
+          stream.end();
+        } catch (e) {
+          stream.destroy(e instanceof Error ? e : new Error(String(e)));
+        }
+      })();
+    });
+  }
+  if (done === 0) {
+    throw new Error("下载内容为空，下载中止");
+  }
+
+  const { noteId, author, cover } = xhsMetaOf(opts);
+  const title = (opts.title ?? opts.meta?.title ?? stem).trim() || stem;
+  const sidecar: XhsSidecar = {
+    source: "xiaohongshu",
+    note_id: noteId,
+    source_url: opts.sourceUrl ?? opts.meta?.source_url ?? "",
+    title,
+    author,
+    cover,
+    video_url: opts.downloadUrl,
+    file: outPath,
+    downloaded_at: Math.floor(Date.now() / 1000),
+    kind: "video",
+  };
+  const metaPath = outPath.replace(/\.mp4$/i, "") + ".meta.json";
+  try {
+    await writeFile(metaPath, `${JSON.stringify(sidecar, null, 2)}\n`, "utf8");
+  } catch (e) {
+    throw new Error(`sidecar 写入失败：${errText(e)}`);
+  }
+
+  const fn = opts.recordLedger ?? recordLedger;
+  try {
+    await fn(opts.userDataDir, `xhs:${collection}`, basename, {
+      path: outPath,
+      saved_at: Math.floor(Date.now() / 1000),
+      template: "xhs",
+    });
+  } catch (e) {
+    throw new Error(`记账失败：${errText(e)}`);
+  }
+  return outPath;
+}
+
+/**
+ * 小红书直链下载：fire-and-forget。
+ * 空直链抛 `视频直链为空`；同一 `xhs:<collectionId>:<basename>` 重入返回
+ * `"downloading"`；正常返回 `"started"`；结果走
+ * `emit("download-done", {file_id, ok, path?, error?})`（`file_id` 即防重入 key）。
+ */
+export async function downloadXhsDirect(opts: DownloadXhsDirectOptions): Promise<string> {
+  if (opts.downloadUrl.trim() === "") {
+    throw new Error("视频直链为空");
+  }
+  if (opts.collectionId.trim() === "") {
+    throw new Error("合集不能为空");
+  }
+  const collection = opts.collectionId.trim();
+  const stem = xhsStemOf(opts);
+  const key = xhsInFlightKey(collection, stem);
+  if (xhsInFlight.has(key)) return "downloading";
+  xhsInFlight.add(key);
+  void run_xhs_pipeline(opts, key, stem).then(
+    (pathStr) => {
+      const payload: DownloadDonePayload = { file_id: key, ok: true, path: pathStr };
+      opts.emit("download-done", payload);
+    },
+    (e: unknown) => {
+      const payload: DownloadDonePayload = { file_id: key, ok: false, error: errText(e) };
+      opts.emit("download-done", payload);
+    },
+  ).finally(() => {
+    xhsInFlight.delete(key);
   });
   return "started";
 }

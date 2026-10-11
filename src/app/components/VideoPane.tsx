@@ -9,6 +9,7 @@ import { downloadVideo, getStatusBatch, videoPreview } from "../api";
 import type { VideoPreview } from "../api";
 import { useStore } from "../store";
 import VideoPlayerModal from "./VideoPlayerModal";
+import { toLocalMediaUrl } from "../../../electron/shared/media-url";
 
 /** 播放器模式：open=双击完整播放器，preview=空格 Quick Look 预览。 */
 export type VideoPaneMode = "open" | "preview";
@@ -39,13 +40,24 @@ const autoSaveFiredKeys = new Set<string>();
 export const autoDownloadSilentIds = new Set<string>();
 
 /**
- * 账本绝对路径 → 本地媒体协议 URL（主进程 media://file/ 直出文件流，支持拖动）。
+ * 播放器错误对象 → 可读文案（xgplayer 抛的常是普通对象，直接 String 会变成 `[object Object]`）。
  *
- * @param absPath - 本地绝对路径
- * @returns media:// URL
+ * @param err - 播放器 error 事件载荷
+ * @returns 可读描述（空串表示无可用信息）
  */
-function toLocalMediaUrl(absPath: string): string {
-  return `media://file${encodeURI(absPath)}`;
+function describePlayerError(err: unknown): string {
+  if (err === null || err === undefined) return "";
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (typeof err === "object") {
+    try {
+      const s = JSON.stringify(err);
+      return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+    } catch {
+      return "";
+    }
+  }
+  return String(err);
 }
 
 /**
@@ -96,6 +108,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   const file = mode === "open" ? explorer?.opened_file : explorer?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
+  const isXhs = explorer?.kind === "xiaohongshu";
 
   // 下载进度/完成订阅搬到 FolderView（单实例，避免 open/preview 双实例重复 toast；
   // 且预览触发的下载也能推进度、刷磁贴状态）。
@@ -108,8 +121,9 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const handleSaveRef = useRef<(auto: boolean) => Promise<void>>(async () => undefined);
 
   /**
-   * 拉取播放源：已保存播本地落盘文件（media://），否则单次 preview 取最高档远端。
-   * 本地文件被挪走/删除时由播放器 error 回退远端。
+   * 拉取播放源：xhs 模式直接播本地文件（media://file 绝对路径）；
+   * alipan 已保存播本地落盘文件（media://），否则单次 preview 取最高档远端。
+   * 本地文件被挪走/删除时由播放器 error 回退远端（xhs 无远端则报错）。
    */
   async function fetchPreview(): Promise<void> {
     if (explorer === undefined || explorer === null || file === undefined) {
@@ -125,7 +139,18 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     setExpired(false);
     setExpiredMsg("");
     try {
-      const statuses = await getStatusBatch(explorer.share_id, [file.file_id]);
+      if (explorer.kind === "xiaohongshu") {
+        const abs = file.absPath;
+        if (abs === undefined || abs === "") {
+          throw new Error("本地文件路径缺失");
+        }
+        if (fetchSeqRef.current !== seq) return;
+        setSaved(true);
+        setLocalUrl(toLocalMediaUrl(abs));
+        setLoading(false);
+        return;
+      }
+      const statuses = await getStatusBatch(explorer.collection_id, [file.file_id]);
       if (fetchSeqRef.current !== seq) {
         return;
       }
@@ -152,12 +177,12 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     }
   }
 
-  /** 单次 preview 取最高档远端（本地选档，避免重复打接口）。 */
+  /** 单次 preview 取最高档远端（本地选档，避免重复打接口）。仅 alipan。 */
   async function fetchRemote(seq: number): Promise<void> {
     if (explorer === null || explorer === undefined || file === undefined) {
       return;
     }
-    const list = await videoPreview(explorer.share_id, file.drive_id, file.file_id);
+    const list = await videoPreview(explorer.collection_id, file.drive_id, file.file_id);
     if (fetchSeqRef.current !== seq) {
       return;
     }
@@ -211,10 +236,11 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         }
       };
     }
-    // 播即存（open 与 preview 均触发：第一次 play 自动走一次保存，等价于自动点下载按钮）；
+    // 播即存（仅 alipan：open 与 preview 均触发：第一次 play 自动走一次保存，等价于自动点下载按钮）；
     // 自动路径无开始/完成 toast；handleSave 内部已有已存短路 + 主进程重入 guard，
-    // 跨实例重复由 autoSaveFiredKeys 拦。
+    // 跨实例重复由 autoSaveFiredKeys 拦。xhs 本地文件跳过。
     player.on("play", () => {
+      if (isXhs) return;
       if (autoSaveFiredKeys.has(fileKey)) {
         return;
       }
@@ -235,8 +261,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       innerVideo?.addEventListener("loadedmetadata", readRatio, { once: true });
     }
     player.on("error", (err: unknown) => {
-      // 本地文件被挪走/删除：回退远端播一次（仅一次，防循环）。
-      if (isLocal && !localFallbackDoneRef.current) {
+      // 本地文件被挪走/删除：alipan 回退远端播一次（仅一次，防循环）；xhs 直接报错。
+      if (isLocal && !localFallbackDoneRef.current && !isXhs) {
         localFallbackDoneRef.current = true;
         setLocalUrl("");
         const seq = fetchSeqRef.current + 1;
@@ -255,8 +281,16 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         return;
       }
       setExpired(true);
-      const detail = err instanceof Error ? err.message : String(err ?? "");
-      setExpiredMsg(detail === "" ? "播放失败，点“重取链接”重试" : `播放失败（${detail}），点“重取链接”重试`);
+      const detail = describePlayerError(err);
+      setExpiredMsg(
+        isXhs
+          ? detail === ""
+            ? "本地文件无法播放（可能已损坏、被移动或被删除）"
+            : `本地文件无法播放（${detail}）`
+          : detail === ""
+            ? "播放失败，点“重取链接”重试"
+            : `播放失败（${detail}），点“重取链接”重试`,
+      );
     });
     // 预览自动播放被浏览器拦截时退化为静音播（带声优先，实在不行先动起来）。
     player.on("autoplay_was_prevented", () => {
@@ -283,17 +317,21 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
   }
 
-  /** 保存当前视频（auto=true 为播即存自动触发：不展示开始/完成/已存 toast，失败仍提示）。 */
+  /** 保存当前视频（auto=true 为播即存自动触发：不展示开始/完成/已存 toast，失败仍提示）。xhs 本地文件无需保存。 */
   const curExplorer = explorer;
   const curFile = file;
   async function handleSave(auto = false): Promise<void> {
+    if (curExplorer.kind === "xiaohongshu") {
+      if (!auto) void message.info("本地文件无需保存");
+      return;
+    }
     if (state.materialDir === "") {
       void message.warning("请先在左侧边栏配置素材文件夹");
       return;
     }
     setSaving(true);
     try {
-      const statuses = await getStatusBatch(curExplorer.share_id, [curFile.file_id]);
+      const statuses = await getStatusBatch(curExplorer.collection_id, [curFile.file_id]);
       if (statuses.some((s) => s.file_id === curFile.file_id && s.state === "saved")) {
         setSaved(true);
         if (!auto) {
@@ -312,7 +350,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         .filter((n) => n !== "");
       const subDir = dirs.join("/");
       autoDownloadSilentIds.add(curFile.file_id);
-      await downloadVideo(playUrl, curExplorer.share_id, curFile.file_id, curFile.name, playTemplate, subDir);
+      await downloadVideo(playUrl, curExplorer.collection_id, curFile.file_id, curFile.name, playTemplate, subDir);
       if (!auto) {
         void message.success("已开始下载");
       }
@@ -350,7 +388,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       chrome={isOpen}
       dimmed={isOpen}
       actions={
-        isOpen ? (
+        isOpen && !isXhs ? (
           <Button
             data-testid="save-video"
             type="primary"
@@ -398,17 +436,20 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
           <div style={{ position: "absolute", left: 12, right: 12, bottom: 76, zIndex: 6 }}>
             <Alert
               type="error"
-              message="链接过期请重试"
+              message={isXhs ? "本地文件播放失败" : "链接过期请重试"}
               description={expiredMsg === "" ? undefined : expiredMsg}
               action={
-                <Button
-                  size="small"
-                  onClick={() => {
-                    void fetchPreview();
-                  }}
-                >
-                  重取链接
-                </Button>
+                // 小红书播的是本地文件，无远端可重取，不展示按钮。
+                isXhs ? undefined : (
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      void fetchPreview();
+                    }}
+                  >
+                    重取链接
+                  </Button>
+                )
               }
             />
           </div>

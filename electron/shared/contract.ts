@@ -1,25 +1,47 @@
 /**
- * FastCut IPC 契约（Wave 1）。
+ * FastCut IPC 契约。
  *
  * main / preload / renderer 三方共用的唯一事实来源。
- * 类型语义照抄 `src/app/api.ts` 的同名接口：
+ * 类型语义：
  * - invoke 顶层参数名沿用 camelCase（如 shareId / fileIds / m3u8Url）；
  * - 嵌套结构体与后端字段保持 snake_case（如 share_id / target_dir）。
  *
- * Channel 名与旧 Tauri 命令名一一对应（14 个）+ 缩略图缓存 2 个；事件 2 个。
- * Wave 3 在 main 侧按此表注册 `ipcMain.handle`，preload 原样透出。
+ * Channel 名与旧 Tauri 命令名一一对应 + 缩略图缓存 2 个 + 合集 4 个 + 本地文件 5 个；事件 2 个。
+ * main 侧按此表注册 `ipcMain.handle`，preload 原样透出。
  */
 
 /** 清晰度档位。 */
 export type Definition = "AUTO" | "HD" | "SD";
 
-/** 已保存的分享链接（与落盘 schema/序列化一致：无 pwd 写 null，added_at 为秒级整数）。 */
-export interface SavedShare {
-  share_id: string;
-  url: string;
+/** 合集种类：alipan 为分享链接合集，xiaohongshu 为本地落盘合集。 */
+export type CollectionKind = "alipan" | "xiaohongshu";
+
+/**
+ * 合集。
+ * - alipan：`id` 复用 `share_id`，带 `url`（`pwd` 无值时为 null）；
+ * - xiaohongshu：`id` 为 `xhs_<短id>`，`relDir` 为相对 `target_dir` 的
+ *   `collections/<slug>/`（`slug = sanitizeSegment(name) + 短id`），无 url。
+ * `created_at` 为秒级整数。
+ */
+export interface Collection {
+  id: string;
+  kind: CollectionKind;
   name: string;
-  pwd: string | null;
-  added_at: number;
+  created_at: number;
+  share_id?: string;
+  url?: string;
+  pwd?: string | null;
+  relDir?: string;
+}
+
+/** 本地文件条目：`relPath` 均相对 `target_dir`（posix 风格 `/` 分隔）；`absPath` 为本地绝对路径（供播放/拖拽用）。 */
+export interface LocalItem {
+  name: string;
+  relPath: string;
+  isDir: boolean;
+  size: number;
+  mtime: number;
+  absPath: string;
 }
 
 /** 分享元信息。 */
@@ -107,6 +129,20 @@ export interface DownloadVideoOpts {
   sub_dir: string;
 }
 
+/** collection_add 入参：按 kind 分参。 */
+export type AddCollectionInput =
+  | { kind: "alipan"; url: string; pwd?: string }
+  | { kind: "xiaohongshu"; name: string };
+
+/** 小红书解析结果（M3，仅视频期）。 */
+export interface XhsParseResult {
+  title: string;
+  downloadUrl: string;
+  cover: string;
+  noteId: string;
+  author: string;
+}
+
 /** download-progress 事件载荷。 */
 export interface DownloadProgressPayload {
   file_id: string;
@@ -122,14 +158,19 @@ export interface DownloadDonePayload {
   error?: string;
 }
 
-// ---- Channel 名（14 个，与旧 Tauri 命令名一致） ----
+// ---- Channel 名 ----
 
 /** IPC channel 名联合类型。 */
 export type IpcChannel =
-  | "list_shares"
-  | "add_share"
-  | "rename_share"
-  | "remove_share"
+  | "collection_list"
+  | "collection_add"
+  | "collection_rename"
+  | "collection_remove"
+  | "fs_list"
+  | "fs_mkdir"
+  | "fs_rename"
+  | "fs_move"
+  | "fs_remove"
   | "get_config"
   | "set_config"
   | "pick_folder"
@@ -141,14 +182,21 @@ export type IpcChannel =
   | "get_share_meta"
   | "download_video"
   | "thumbnail_warm"
-  | "thumbnail_local";
+  | "thumbnail_local"
+  | "xhs_parse"
+  | "xhs_import";
 
 /** 各 channel 的 invoke 入参（顶层 camelCase）。 */
 export interface IpcParams {
-  list_shares: Record<string, never>;
-  add_share: { url: string; pwd?: string };
-  rename_share: { shareId: string; name: string };
-  remove_share: { shareId: string };
+  collection_list: Record<string, never>;
+  collection_add: AddCollectionInput;
+  collection_rename: { id: string; name: string };
+  collection_remove: { id: string };
+  fs_list: { relDir?: string };
+  fs_mkdir: { relDir: string };
+  fs_rename: { relPath: string; name: string };
+  fs_move: { relPath: string; destDir: string };
+  fs_remove: { relPath: string };
   get_config: Record<string, never>;
   set_config: { config: { target_dir?: string; definition?: string } };
   pick_folder: Record<string, never>;
@@ -182,14 +230,23 @@ export interface IpcParams {
   thumbnail_warm: { shareId: string; files: { fileId: string; url: string }[] };
   /** 查单个缩略图本地缓存：命中返回媒体 URL，否则 null。 */
   thumbnail_local: { shareId: string; fileId: string };
+  /** 小红书解析：短链先跟随跳转，仅视频期。 */
+  xhs_parse: { url: string };
+  /** 小红书导入：先 parse 再落盘到合集目录，返回 "started"/"downloading"。 */
+  xhs_import: { url: string; collectionId: string; subDir?: string; fileName?: string };
 }
 
-/** 各 channel 的 invoke 返回（rename_share 以旧 Rust `Result<SavedShare>` 为准，返回更新后的分享）。 */
+/** 各 channel 的 invoke 返回。 */
 export interface IpcResult {
-  list_shares: SavedShare[];
-  add_share: SavedShare;
-  rename_share: SavedShare;
-  remove_share: void;
+  collection_list: Collection[];
+  collection_add: Collection;
+  collection_rename: Collection;
+  collection_remove: void;
+  fs_list: LocalItem[];
+  fs_mkdir: void;
+  fs_rename: void;
+  fs_move: void;
+  fs_remove: void;
   get_config: AppConfig;
   set_config: void;
   pick_folder: string | null;
@@ -202,6 +259,8 @@ export interface IpcResult {
   download_video: string;
   thumbnail_warm: { cached: Record<string, string> };
   thumbnail_local: { url: string } | null;
+  xhs_parse: XhsParseResult;
+  xhs_import: string;
 }
 
 // ---- 事件名（2 个） ----
