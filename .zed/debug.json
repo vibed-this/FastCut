@@ -1,11 +1,13 @@
 [
   {
-    "label": "Debug FastCut (Tauri backend)",
-    "adapter": "CodeLLDB",
+    "label": "Debug Electron Main",
+    "adapter": "Node",
     "request": "launch",
-    "program": "$ZED_WORKTREE_ROOT/src-tauri/target/debug/fastcut",
-    "cwd": "$ZED_WORKTREE_ROOT/src-tauri",
-    "sourceLanguages": ["rust"],
-    "build": "Build Tauri backend (cargo)"
+    "program": "$ZED_WORKTREE_ROOT/out/main/index.js",
+    "runtimeExecutable": "$ZED_WORKTREE_ROOT/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    "args": ["$ZED_WORKTREE_ROOT"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": ["javascript", "typescript"],
+    "build": "Build"
   }
 ]

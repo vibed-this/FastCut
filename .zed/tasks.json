@@ -1,38 +1,36 @@
 [
   {
-    "label": "Tauri Dev",
-    "command": "export NO_PROXY=\"$NO_PROXY,localhost,127.0.0.1\"; npm run tauri dev",
+    "label": "Electron Dev",
+    "command": "export NO_PROXY=\"$NO_PROXY,localhost,127.0.0.1\"; npm run dev",
     "cwd": "$ZED_WORKTREE_ROOT",
     "use_new_terminal": true,
     "allow_concurrent_runs": true,
     "reveal": "always"
   },
   {
-    "label": "Frontend: build",
+    "label": "Build",
     "command": "npm run build",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "no_focus",
     "hide": "on_success"
   },
   {
-    "label": "Build Tauri backend (cargo)",
-    "command": "cargo build",
-    "cwd": "$ZED_WORKTREE_ROOT/src-tauri",
+    "label": "Test (vitest)",
+    "command": "npm test",
+    "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "no_focus",
     "hide": "on_success"
   },
   {
-    "label": "Rust: check",
-    "command": "cargo check",
-    "cwd": "$ZED_WORKTREE_ROOT/src-tauri",
-    "reveal": "no_focus",
-    "hide": "on_success"
+    "label": "E2E (playwright)",
+    "command": "npm run e2e",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always"
   },
   {
-    "label": "Rust: test",
-    "command": "cargo test",
-    "cwd": "$ZED_WORKTREE_ROOT/src-tauri",
-    "reveal": "no_focus",
-    "hide": "on_success"
+    "label": "Dist (dmg)",
+    "command": "npm run dist",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always"
   }
 ]
