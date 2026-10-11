@@ -386,7 +386,12 @@ export interface DownloadVideoOptions {
   ) => Promise<void>;
 }
 
+/** CLI 覆盖目标目录的环境变量（应用内通常未设置，无影响；CLI 侧由 --target-dir 写入）。 */
+const TARGET_DIR_ENV = "FASTCUT_TARGET_DIR";
+
 async function readTargetDir(userDataDir: string): Promise<string> {
+  const fromEnv = process.env[TARGET_DIR_ENV]?.trim() ?? "";
+  if (fromEnv !== "") return fromEnv;
   const config = await getConfig(userDataDir);
   const dirRaw: string = config?.target_dir ?? "";
   if (dirRaw.trim() === "") {

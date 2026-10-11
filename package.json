@@ -9,7 +9,9 @@
     "build": "tsc --noEmit && electron-vite build",
     "dist": "npm run build && electron-builder --mac",
     "test": "vitest run",
-    "e2e": "playwright test --config e2e/playwright.config.ts"
+    "e2e": "playwright test --config e2e/playwright.config.ts",
+    "build:cli": "esbuild cli/main.ts --bundle --platform=node --format=esm --external:ffmpeg-static --outfile=out/cli/fastcut-cli.js",
+    "cli": "node out/cli/fastcut-cli.js"
   },
   "dependencies": {
     "antd": "^6.6.5",

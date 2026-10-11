@@ -406,7 +406,12 @@ function resolveIsDownloading(deps?: StatusDeps): IsDownloadingFn {
   return deps?.isDownloading ?? isDownloadingProvider;
 }
 
+/** CLI 覆盖目标目录的环境变量（应用内通常未设置，无影响；CLI 侧由 --target-dir 写入）。 */
+const TARGET_DIR_ENV = "FASTCUT_TARGET_DIR";
+
 function requireTargetDir(data: StoreData): string {
+  const fromEnv = process.env[TARGET_DIR_ENV]?.trim() ?? "";
+  if (fromEnv !== "") return fromEnv;
   const dir = data.config.target_dir?.trim() ?? "";
   if (dir === "") throw new Error("未配置目标文件夹，请先在设置页选择下载目录");
   return dir;
@@ -565,7 +570,8 @@ export async function removeCollection(userDataDir: string, id: string): Promise
   if (idx === -1) throw new Error("合集不存在");
   const item = data.collections[idx] as Collection;
   if (item.kind === "xiaohongshu" && item.relDir !== undefined && item.relDir.trim() !== "") {
-    const targetRaw = data.config.target_dir?.trim() ?? "";
+    const fromEnv = process.env[TARGET_DIR_ENV]?.trim() ?? "";
+    const targetRaw = fromEnv !== "" ? fromEnv : (data.config.target_dir?.trim() ?? "");
     if (targetRaw !== "") {
       try {
         await rm(join(targetRaw, item.relDir), { recursive: true, force: true });
