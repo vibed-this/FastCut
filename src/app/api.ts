@@ -497,6 +497,14 @@ export function getLocalThumbnail(share_id: string, file_id: string): Promise<st
   );
 }
 
+/**
+ * 本地视频缩略图预取：把一批 relPath 交给 main，缺失才 ffmpeg 抽帧；
+ * 返回命中的 relPath → 本地媒体 URL（失败项直接缺席，调用方回退图标）。
+ */
+export function warmLocalVideoThumbnails(files: string[]): Promise<Record<string, string>> {
+  return invoke("thumbnail_local_warm", { files }).then((r) => r.cached);
+}
+
 // ---- 事件订阅（主契约：返回 Promise<UnlistenFn>）----
 
 export function onDownloadProgress(

@@ -35,6 +35,7 @@ import {
   onDownloadDone,
   onDownloadProgress,
   videoPreview,
+  warmLocalVideoThumbnails,
   warmThumbnails,
   xhsImport,
 } from "../api";
@@ -185,6 +186,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [statusMap, setStatusMap] = useState<Record<string, FileStatus>>({});
   /** 缩略图本地缓存：fileId → media:// 本地 URL；命中即秒显，不阻塞远程首绘。 */
   const [thumbLocalMap, setThumbLocalMap] = useState<Record<string, string>>({});
+  /** 本地视频缩略图：relPath → media:// 本地 URL（ffmpeg 抽帧，失败回退图标）。 */
+  const [localThumbMap, setLocalThumbMap] = useState<Record<string, string>>({});
   /** hover 命中收敛到 store（App 层空格预览共用同一目标）。 */
   /** 磁贴直下取链中（preview 未返回、progress 事件未到前的空窗期即转圈、防连点）。 */
   const [tilePendingMap, setTilePendingMap] = useState<Record<string, boolean>>({});
@@ -257,7 +260,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     return explorer.stack[explorer.stack.length - 1]?.file_id ?? "";
   }, [explorer]);
 
-  /** xhs 本地目录加载。 */
+  /** xhs 本地目录加载（视频条目顺带后台抽帧缩略图，fire-and-forget）。 */
   const loadXhs = useCallback(async () => {
     if (explorer === undefined || explorer === null || explorer.kind !== "xiaohongshu") {
       return;
@@ -269,6 +272,16 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       const entries = await fsList(relDir);
       setXhsItems(entries);
       setXhsSelected([]);
+      const videos = entries
+        .filter((e) => !e.isDir && isVideoName(e.name))
+        .map((e) => e.relPath);
+      if (videos.length > 0) {
+        warmLocalVideoThumbnails(videos)
+          .then((cached) => {
+            setLocalThumbMap((prev) => ({ ...prev, ...cached }));
+          })
+          .catch(() => undefined);
+      }
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -913,6 +926,13 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     ) : null;
     const cover = isFolder ? (
       <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
+    ) : isVideo && localThumbMap[entry.relPath] !== undefined ? (
+      // ffmpeg 抽帧命中秒显（media://），未命中/失败回退图标
+      <ThumbImage
+        src={localThumbMap[entry.relPath] as string}
+        name={entry.name}
+        video
+      />
     ) : isVideo ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
     ) : (

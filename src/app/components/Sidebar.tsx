@@ -264,7 +264,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
             <Typography.Text
               data-testid="collection-item"
               ellipsis
-              style={{ maxWidth: 110 }}
+              style={{ maxWidth: "100%" }}
               title={collection.name}
             >
               {collection.name}

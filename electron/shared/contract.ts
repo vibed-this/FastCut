@@ -183,6 +183,7 @@ export type IpcChannel =
   | "download_video"
   | "thumbnail_warm"
   | "thumbnail_local"
+  | "thumbnail_local_warm"
   | "xhs_parse"
   | "xhs_import";
 
@@ -230,6 +231,8 @@ export interface IpcParams {
   thumbnail_warm: { shareId: string; files: { fileId: string; url: string }[] };
   /** 查单个缩略图本地缓存：命中返回媒体 URL，否则 null。 */
   thumbnail_local: { shareId: string; fileId: string };
+  /** 本地视频缩略图预取：缺失项 ffmpeg 抽帧，返回命中的 relPath → 本地媒体 URL。 */
+  thumbnail_local_warm: { files: string[] };
   /** 小红书解析：短链先跟随跳转，仅视频期。 */
   xhs_parse: { url: string };
   /** 小红书导入：先 parse 再落盘到合集目录，返回 "started"/"downloading"。 */
@@ -259,6 +262,7 @@ export interface IpcResult {
   download_video: string;
   thumbnail_warm: { cached: Record<string, string> };
   thumbnail_local: { url: string } | null;
+  thumbnail_local_warm: { cached: Record<string, string> };
   xhs_parse: XhsParseResult;
   xhs_import: string;
 }

@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import type { AddCollectionInput, Collection as IpcCollection } from "../shared/contract.js";
 import { downloadVideo, downloadXhsDirect, isDownloading } from "./downloader.js";
 import { fsList, fsMkdir, fsMove, fsRemove, fsRename } from "./localfs.js";
+import { warmLocalVideoThumbnails } from "./local-thumb.js";
 import { XhsClient } from "./xhs-client.js";
 import {
   get_share_meta,
@@ -302,6 +303,20 @@ function registerIpcHandlers(userDataDir: string): void {
     try {
       const url = await localThumbnail(userDataDir, args.shareId, args.fileId);
       return url === null ? null : { url };
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("thumbnail_local_warm", async (_e, args: { files: string[] }) => {
+    try {
+      const targetDir = await requireTargetDir(userDataDir);
+      const { cached } = await warmLocalVideoThumbnails(
+        userDataDir,
+        targetDir,
+        Array.isArray(args.files) ? args.files : [],
+      );
+      return { cached };
     } catch (e) {
       throw new Error(errMsg(e));
     }

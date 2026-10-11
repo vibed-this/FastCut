@@ -265,8 +265,9 @@ async function probeFfmpeg(cmd: string): Promise<ProbeResult> {
 /**
  * ffmpeg 路径策略：优先 `ffmpeg-static` 自带二进制，其次系统 PATH 的 `ffmpeg`。
  * 自检逻辑保留：二进制存在但 `-version` 非零退出→"ffmpeg 自检失败，请重装 ffmpeg 后再试"。
+ * 导出供 local-thumb.ts 复用（本地视频缩略图抽帧）。
  */
-async function findFfmpeg(): Promise<string> {
+export async function findFfmpeg(): Promise<string> {
   // 打包后 ffmpeg-static 返回 app.asar 内路径，spawn 无法执行 asar 内二进制；
   // electron-builder 已将其 asarUnpack，故改写到 app.asar.unpacked。dev 下路径
   // 不含 app.asar，replace 为空操作。
