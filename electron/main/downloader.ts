@@ -266,7 +266,12 @@ async function probeFfmpeg(cmd: string): Promise<ProbeResult> {
  * 自检逻辑保留：二进制存在但 `-version` 非零退出→"ffmpeg 自检失败，请重装 ffmpeg 后再试"。
  */
 async function findFfmpeg(): Promise<string> {
-  const bundled: string | null = ffmpegStatic;
+  // 打包后 ffmpeg-static 返回 app.asar 内路径，spawn 无法执行 asar 内二进制；
+  // electron-builder 已将其 asarUnpack，故改写到 app.asar.unpacked。dev 下路径
+  // 不含 app.asar，replace 为空操作。
+  const raw: string | null = ffmpegStatic;
+  const bundled: string | null =
+    raw === null || raw === "" ? raw : raw.replace("app.asar", "app.asar.unpacked");
   if (bundled !== null && bundled !== "" && (await ffmpegFileExists(bundled))) {
     const r = await probeFfmpeg(bundled);
     if (r === "ok") return bundled;

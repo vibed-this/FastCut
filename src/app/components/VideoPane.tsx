@@ -127,7 +127,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey, definition]);
 
-  // 播放器接入：WKWebView 原生支持 HLS，优先原生（hls.js 在 WebView 内取 m3u8 会 manifestLoadError）
+  // 播放器接入：loading 期间 video 会被 skeleton 卸载重挂，必须把 loading
+  // 纳入依赖，否则 playUrl 不变时 effect 不再跑、src 永不设置（黑屏）。
   useEffect(() => {
     const video = videoRef.current;
     if (video === null || playUrl === "") {
@@ -167,7 +168,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         hlsRef.current = null;
       }
     };
-  }, [playUrl]);
+  }, [playUrl, loading]);
 
   // tab 关闭时清理由卸载触发，此处兜底卸载销毁
   useEffect(
