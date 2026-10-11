@@ -5,7 +5,7 @@ import {
   type Dispatch,
   type ReactNode,
 } from "react";
-import type { Definition, SavedShare, ShareItem } from "./api";
+import type { SavedShare, ShareItem } from "./api";
 
 // ---- State ----
 
@@ -44,7 +44,6 @@ export interface AppState {
   activeTabId: string | null;
   /** 素材目录：UI 侧会与 null 比较，故类型放宽，初始值仍为 ""。 */
   materialDir: string | null;
-  definition: Definition;
   globalError: string | null;
 }
 
@@ -53,7 +52,6 @@ export const initialState: AppState = {
   tabs: [],
   activeTabId: null,
   materialDir: "",
-  definition: "AUTO",
   globalError: null,
 };
 
@@ -65,8 +63,6 @@ export type Action =
   | { type: "shares/rename"; share_id: string; name: string }
   | { type: "shares/remove"; share_id: string }
   | { type: "material/set"; dir: string }
-  | { type: "definition/set"; definition: Definition }
-  | { type: "config/set"; materialDir: string | null; definition: string }
   | { type: "error/set"; message: string | null }
   | { type: "tabs/add"; tab: Tab }
   | { type: "tabs/open"; share: SavedShare }
@@ -163,14 +159,6 @@ export function reducer(state: AppState, action: Action): AppState {
     }
     case "material/set":
       return { ...state, materialDir: action.dir };
-    case "definition/set":
-      return { ...state, definition: action.definition };
-    case "config/set":
-      return {
-        ...state,
-        materialDir: action.materialDir,
-        definition: action.definition as Definition,
-      };
     case "error/set":
       return { ...state, globalError: action.message };
     case "tabs/add": {

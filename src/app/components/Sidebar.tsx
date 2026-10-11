@@ -9,12 +9,11 @@ import {
   List,
   Modal,
   Popconfirm,
-  Select,
   Typography,
 } from "antd";
 import { DeleteOutlined, EllipsisOutlined, PlusOutlined } from "@ant-design/icons";
 import { addShare, pickFolder, removeShare, renameShare, setConfig } from "../api";
-import type { Definition, SavedShare } from "../api";
+import type { SavedShare } from "../api";
 import { useStore } from "../store";
 
 /** 添加分享弹窗内部的表单状态。 */
@@ -159,16 +158,6 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
   }
 
-  /** 切换清晰度。 */
-  async function handleDefinitionChange(value: Definition): Promise<void> {
-    try {
-      await setConfig({ definition: value });
-      dispatch({ type: "definition/set", definition: value });
-    } catch (e) {
-      void message.error(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   const emptyMaterial = state.materialDir === "";
 
   return (
@@ -303,25 +292,6 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
               选择
             </Button>
           </div>
-        </div>
-        <div>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            清晰度
-          </Typography.Text>
-          <Select<Definition>
-            data-testid="settings-definition"
-            size="small"
-            style={{ width: "100%", marginTop: 4 }}
-            value={state.definition}
-            options={[
-              { value: "AUTO", label: "自动" },
-              { value: "HD", label: "高清" },
-              { value: "SD", label: "标清" },
-            ]}
-            onChange={(v) => {
-              void handleDefinitionChange(v);
-            }}
-          />
         </div>
       </div>
       <Modal

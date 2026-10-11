@@ -27,7 +27,6 @@ export default function App(): React.JSX.Element {
         }
         dispatch({ type: "shares/set", shares });
         dispatch({ type: "material/set", dir: cfg.target_dir ?? "" });
-        dispatch({ type: "definition/set", definition: cfg.definition });
       } catch (e) {
         if (!cancelled) {
           void message.error(e instanceof Error ? e.message : String(e));
