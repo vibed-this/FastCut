@@ -7,9 +7,17 @@
  * - `POST {PDS}/adrive/v2/file/list_by_share`（需 `x-share-token`）
  * - `POST {PDS}/adrive/v2/file/get_video_preview_play_info_by_share`
  *   （`category: "quick_video"`，`video_preview_play_info.quick_video_list` 内嵌）
- * - `POST {PDS}/adrive/v2/share_link/get_share_by_anonymous`（需 `/adrive` 前缀）
+ * - `POST {PDS}/adrive/v3/share_link/get_share_by_anonymous?share_id={id}`
+ *   （2026-10-11 浏览器实测为 v3 带 query；响应体与 v2 同形）
  * - 公共请求头 `X-Canary: client=web,app=share,version=v2.3.1`，
- *   `Origin: https://www.alipan.com`，`Referer: https://www.alipan.com/s/{share_id}`
+ *   `Origin: https://www.alipan.com`，`Referer: https://www.alipan.com/`，
+ *   `User-Agent: Chrome/154`，`x-device-id: <进程级稳定 UUID>`。
+ *   实测浏览器全程不发 `Cookie`，匿名链路无需登录态。
+ * - `list_by_share` 必须带缩略图参数（`video_thumbnail_process` 等），
+ *   响应每项自带 `thumbnail` 快照；列表禁止逐项调 preview 接口
+ *   （逐项调是 `TooManyRequests` 的直接原因）。
+ * - `share_token` 进程级复用（按 share_id+pwd 缓存），跨 `ShareClient`
+ *   实例共享；`TooManyRequests` 时退避重试一次。
  *
  * 结构参考 alist `aliyundrive_share` 驱动：请求集中注入 canary/share-token，
  * 遇到 `ShareLinkTokenInvalid` 时刷新 token 后重试一次。不适用部分：
@@ -26,6 +34,8 @@
  * 它们走全局 `fetch` 打真实端点（见 `electron/main/share-api.test.ts` 的 mock 用法）。
  */
 
+import { randomUUID } from "node:crypto";
+
 import type {
   Definition,
   ListShareResult,
@@ -38,6 +48,23 @@ import type {
 export const PDS_ENDPOINT = "https://api.aliyundrive.com";
 export const CANARY = "client=web,app=share,version=v2.3.1";
 export const ORIGIN = "https://www.alipan.com";
+/** 浏览器实测 UA（Chrome/154），匿名链路分桶更宽松。 */
+export const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
+/** 进程级稳定设备 id（浏览器为固定值；此处进程内复用，避免每次随机被风控）。 */
+export const DEVICE_ID = (() => {
+  try {
+    return randomUUID();
+  } catch {
+    return "00000000-0000-4000-8000-000000000000";
+  }
+})();
+/** `list_by_share` 缩略图参数（与浏览器实测一致）：要快照必须带。 */
+export const IMAGE_THUMBNAIL_PROCESS = "image/resize,w_256/format,jpeg";
+export const IMAGE_URL_PROCESS = "image/resize,w_1920/format,jpeg/interlace,1";
+export const VIDEO_THUMBNAIL_PROCESS = "video/snapshot,t_1000,f_jpg,ar_auto,w_256";
+/** `TooManyRequests` 退避重试：只重试一次，避免雪崩。 */
+export const RATE_LIMIT_RETRY_MS = 1000;
 export const REQUEST_TIMEOUT_SECS = 30;
 /** 单页条数上限兼默认值（与 Rust `LIST_PAGE_LIMIT` 一致）。 */
 export const LIST_PAGE_LIMIT = 100;
@@ -279,6 +306,36 @@ interface CachedToken {
   fetchedAt: number;
 }
 
+/**
+ * 进程级 token 缓存（按 share_id+pwd），跨 `ShareClient` 实例复用。
+ * 存 `fetchFn` 引用：仅同一 fetch 实现才命中，避免单测 mock 串扰。
+ */
+interface GlobalTokenEntry extends CachedToken {
+  fetchFn: typeof fetch;
+}
+
+const globalTokenCache = new Map<string, GlobalTokenEntry>();
+
+function tokenCacheKey(shareId: string, pwd?: string): string {
+  return `${shareId}\n${pwd ?? ""}`;
+}
+
+/** 清空进程级 token 缓存（单测隔离用）。 */
+export function clearShareTokenCache(): void {
+  globalTokenCache.clear();
+}
+export const clear_share_token_cache = clearShareTokenCache;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 是否为限流错误（命中即退避重试一次）。 */
+export function is_too_many_requests(err: unknown): boolean {
+  return err instanceof ShareApiError && err.code === "TooManyRequests";
+}
+export const isTooManyRequests = is_too_many_requests;
+
 interface TokenResp {
   share_token: string;
   expire_time?: string;
@@ -307,8 +364,10 @@ export class ShareClient {
     return {
       "Content-Type": "application/json",
       Origin: ORIGIN,
-      Referer: `${ORIGIN}/s/${this.shareId}`,
+      Referer: `${ORIGIN}/`,
+      "User-Agent": USER_AGENT,
       "X-Canary": CANARY,
+      "x-device-id": DEVICE_ID,
     };
   }
 
@@ -321,55 +380,94 @@ export class ShareClient {
     if (this.sharePwd !== undefined) body["share_pwd"] = this.sharePwd;
     const url = `${PDS_ENDPOINT}/v2/share_link/get_share_token`;
     const resp = await this.post_anonymous<TokenResp>(url, body);
-    this.cachedToken = { token: resp.share_token, fetchedAt: Date.now() };
+    const entry = { token: resp.share_token, fetchedAt: Date.now() };
+    this.cachedToken = entry;
+    globalTokenCache.set(tokenCacheKey(this.shareId, this.sharePwd), {
+      ...entry,
+      fetchFn: this.fetchFn,
+    });
     return resp.share_token;
   }
 
-  /** 取 share_token，7000s 内命中内存缓存（站方 expires_in 为 7200）。 */
+  /**
+   * 取 share_token：实例缓存 → 进程级缓存（同 fetch 实现）→ 网络。
+   * 站方 expires_in 为 7200，此处 7000s 内命中缓存。
+   */
   async shareToken(): Promise<string> {
     const cached = this.cachedToken;
     if (cached !== null && Date.now() - cached.fetchedAt < TOKEN_TTL_SECS * 1000) {
       return cached.token;
     }
+    const global = globalTokenCache.get(tokenCacheKey(this.shareId, this.sharePwd));
+    if (
+      global !== undefined &&
+      global.fetchFn === this.fetchFn &&
+      Date.now() - global.fetchedAt < TOKEN_TTL_SECS * 1000
+    ) {
+      this.cachedToken = { token: global.token, fetchedAt: global.fetchedAt };
+      return global.token;
+    }
     return this.refresh_share_token();
   }
 
   private async post_anonymous<T>(url: string, body: unknown): Promise<T> {
-    let resp: Response;
-    try {
-      resp = await this.fetchFn(url, {
-        method: "POST",
-        headers: this.anonymousHeaders(),
-        body: JSON.stringify(body),
-        signal:
-          typeof AbortSignal.timeout === "function"
-            ? AbortSignal.timeout(REQUEST_TIMEOUT_SECS * 1000)
-            : undefined,
-      });
-    } catch (e) {
-      if (e instanceof ShareApiError) throw e;
-      throw transport_error(e);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let resp: Response;
+      try {
+        resp = await this.fetchFn(url, {
+          method: "POST",
+          headers: this.anonymousHeaders(),
+          body: JSON.stringify(body),
+          signal:
+            typeof AbortSignal.timeout === "function"
+              ? AbortSignal.timeout(REQUEST_TIMEOUT_SECS * 1000)
+              : undefined,
+        });
+      } catch (e) {
+        if (e instanceof ShareApiError) throw e;
+        throw transport_error(e);
+      }
+      try {
+        return await parse_api_response<T>(resp);
+      } catch (e) {
+        if (is_too_many_requests(e) && attempt === 0) {
+          await sleep(RATE_LIMIT_RETRY_MS);
+          continue;
+        }
+        throw e;
+      }
     }
-    return parse_api_response<T>(resp);
+    throw new Error("unreachable");
   }
 
   private async post_share_with<T>(url: string, body: unknown, token: string): Promise<T> {
-    let resp: Response;
-    try {
-      resp = await this.fetchFn(url, {
-        method: "POST",
-        headers: { ...this.anonymousHeaders(), "x-share-token": token },
-        body: JSON.stringify(body),
-        signal:
-          typeof AbortSignal.timeout === "function"
-            ? AbortSignal.timeout(REQUEST_TIMEOUT_SECS * 1000)
-            : undefined,
-      });
-    } catch (e) {
-      if (e instanceof ShareApiError) throw e;
-      throw transport_error(e);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let resp: Response;
+      try {
+        resp = await this.fetchFn(url, {
+          method: "POST",
+          headers: { ...this.anonymousHeaders(), "x-share-token": token },
+          body: JSON.stringify(body),
+          signal:
+            typeof AbortSignal.timeout === "function"
+              ? AbortSignal.timeout(REQUEST_TIMEOUT_SECS * 1000)
+              : undefined,
+        });
+      } catch (e) {
+        if (e instanceof ShareApiError) throw e;
+        throw transport_error(e);
+      }
+      try {
+        return await parse_api_response<T>(resp);
+      } catch (e) {
+        if (is_too_many_requests(e) && attempt === 0) {
+          await sleep(RATE_LIMIT_RETRY_MS);
+          continue;
+        }
+        throw e;
+      }
     }
-    return parse_api_response<T>(resp);
+    throw new Error("unreachable");
   }
 
   /** 带 share-token 的请求；token 失效时刷新一次并重试（对齐 alist 驱动）。 */
@@ -401,6 +499,9 @@ export class ShareClient {
       share_id: this.shareId,
       parent_file_id: parent,
       limit: normalize_limit(limit),
+      image_thumbnail_process: IMAGE_THUMBNAIL_PROCESS,
+      image_url_process: IMAGE_URL_PROCESS,
+      video_thumbnail_process: VIDEO_THUMBNAIL_PROCESS,
       order_by: "name",
       order_direction: "ASC",
     };
@@ -443,6 +544,7 @@ export class ShareClient {
       category: "quick_video",
       template_id: "",
       get_preview_url: true,
+      get_subtitle_info: true,
     };
     const url = `${PDS_ENDPOINT}/adrive/v2/file/get_video_preview_play_info_by_share`;
     const resp = await this.post_share<PreviewResp>(url, body);
@@ -451,13 +553,13 @@ export class ShareClient {
 
   /**
    * 取分享元信息（标题）。此接口不需要 x-share-token，用裸 post。
-   * 注意与取 token 接口不同：此处需要 `/adrive` 前缀（实测无前缀 404）。
+   * 浏览器实测为 v3 带 `?share_id=`（响应体与 v2 同形）。
    */
   async getShareByAnonymous(): Promise<ShareMeta> {
     this.assertShareId();
     const body: Record<string, unknown> = { share_id: this.shareId };
     if (this.sharePwd !== undefined) body["share_pwd"] = this.sharePwd;
-    const url = `${PDS_ENDPOINT}/adrive/v2/share_link/get_share_by_anonymous`;
+    const url = `${PDS_ENDPOINT}/adrive/v3/share_link/get_share_by_anonymous?share_id=${encodeURIComponent(this.shareId)}`;
     const resp = await this.post_anonymous<ShareMetaResp>(url, body);
     return { name: resolve_share_name(resp) };
   }

@@ -2,8 +2,9 @@
  * `share-api.ts` 单测：由旧后端 `share_api.rs` / `store.rs` 的 Rust tests 翻译而来。
  * 全部覆盖纯函数与 mock 注入的客户端逻辑，不打真实网络（CI 无代理不稳定）。
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  clearShareTokenCache,
   extract_quick_video_list,
   extract_share_id,
   normalize_limit,
@@ -15,6 +16,10 @@ import {
   ShareApiError,
   ShareClient,
 } from "./share-api";
+
+beforeEach(() => {
+  clearShareTokenCache();
+});
 import type { VideoPreview } from "../shared/contract";
 
 function template(id: string, width: number, status: string, url: string): VideoPreview {
@@ -231,7 +236,9 @@ describe("listShare 请求形状", () => {
       sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const headers = new Headers(init?.headers);
       expect(headers.get("X-Canary")).toBe("client=web,app=share,version=v2.3.1");
-      expect(headers.get("Referer")).toBe("https://www.alipan.com/s/s1");
+      expect(headers.get("Referer")).toBe("https://www.alipan.com/");
+      expect(headers.get("User-Agent")).toContain("Chrome/154");
+      expect(headers.get("x-device-id")).toBeTruthy();
       return jsonResponse({ items: [], next_marker: "" });
     });
     const client = new ShareClient("s1", undefined, fetchFn as typeof fetch);
@@ -240,9 +247,46 @@ describe("listShare 请求形状", () => {
       share_id: "s1",
       parent_file_id: "root",
       limit: 100,
+      image_thumbnail_process: "image/resize,w_256/format,jpeg",
+      video_thumbnail_process: "video/snapshot,t_1000,f_jpg,ar_auto,w_256",
       order_by: "name",
       order_direction: "ASC",
     });
     expect(sentBody).not.toHaveProperty("marker");
+  });
+
+  it("跨实例复用 token：第二个同 share 客户端不再取 token", async () => {
+    let tokenCalls = 0;
+    const fetchFn = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith("get_share_token")) {
+        tokenCalls += 1;
+        return jsonResponse({ share_token: "shared-t", expires_in: 7200 });
+      }
+      return jsonResponse({ items: [], next_marker: "" });
+    });
+    const a = new ShareClient("reuse-s", undefined, fetchFn as typeof fetch);
+    await a.listShare("root");
+    const b = new ShareClient("reuse-s", undefined, fetchFn as typeof fetch);
+    await b.listShare("root");
+    expect(tokenCalls).toBe(1);
+  });
+
+  it("TooManyRequests 退避重试一次后成功", async () => {
+    let listCalls = 0;
+    const fetchFn = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith("get_share_token")) {
+        return jsonResponse({ share_token: "t", expires_in: 7200 });
+      }
+      listCalls += 1;
+      if (listCalls === 1) {
+        return jsonResponse({ code: "TooManyRequests", message: "too many requests" }, 429);
+      }
+      return jsonResponse({ items: [], next_marker: "" });
+    });
+    const client = new ShareClient("retry-s", undefined, fetchFn as typeof fetch);
+    await expect(client.listShare("root")).resolves.toMatchObject({ next_marker: "" });
+    expect(listCalls).toBe(2);
   });
 });

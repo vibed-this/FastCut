@@ -30,7 +30,7 @@ export interface ShareMeta {
 /** 分享条目类型。 */
 export type ShareItemType = "file" | "folder";
 
-/** 分享目录条目。 */
+/** 分享目录条目（`thumbnail` 为服务端快照，需 `list_by_share` 带缩略图参数才返回）。 */
 export interface ShareItem {
   file_id: string;
   drive_id: string;
@@ -39,6 +39,7 @@ export interface ShareItem {
   size?: number;
   category?: string;
   file_extension?: string;
+  thumbnail?: string;
 }
 
 /** list_share 返回：分页条目 + 下一页 marker。 */
