@@ -52,6 +52,8 @@ export interface Collection {
   added_at: number;
   /** 小红书合集根目录（相对 target_dir，如 collections/foo-abc123）；alipan 为空。 */
   relDir?: string;
+  /** 合集分类（可选，空/缺省即未分类）。 */
+  category?: string | null;
 }
 
 /** 后端原始合集（新形状或旧 SavedShare 形状），映射前用。 */
@@ -85,7 +87,10 @@ function toCollection(raw: RawCollection): Collection {
       : typeof raw["rel_dir"] === "string"
         ? (raw["rel_dir"] as string)
         : undefined;
-  return { collection_id, kind, name, url, pwd, added_at, relDir };
+  const categoryRaw =
+    typeof raw["category"] === "string" ? (raw["category"] as string).trim() : "";
+  const category = categoryRaw === "" ? undefined : categoryRaw;
+  return { collection_id, kind, name, url, pwd, added_at, relDir, category };
 }
 
 // ---- 本地文件 / 小红书模型 ----
@@ -198,23 +203,30 @@ export async function listCollections(): Promise<Collection[]> {
   return arr.map(toCollection);
 }
 
-/** 新建云盘合集（链接+密码）。 */
-export function addCollection(kind: "alipan", args: { url: string; pwd?: string }): Promise<Collection>;
-/** 新建小红书合集（合集名）。 */
-export function addCollection(kind: "xiaohongshu", args: { name: string }): Promise<Collection>;
+/** 新建云盘合集（链接+密码，分类可选）。 */
+export function addCollection(
+  kind: "alipan",
+  args: { url: string; pwd?: string; category?: string },
+): Promise<Collection>;
+/** 新建小红书合集（合集名，分类可选）。 */
+export function addCollection(
+  kind: "xiaohongshu",
+  args: { name: string; category?: string },
+): Promise<Collection>;
 export async function addCollection(
   kind: CollectionKind,
-  args: { url?: string; pwd?: string; name?: string },
+  args: { url?: string; pwd?: string; name?: string; category?: string },
 ): Promise<Collection> {
+  const category = args.category?.trim() === "" ? undefined : args.category?.trim();
   if (kind === "alipan") {
     const url = args.url ?? "";
     const pwd = args.pwd;
-    const raw = await invokeRaw<RawCollection>("collection_add", { kind, url, pwd });
+    const raw = await invokeRaw<RawCollection>("collection_add", { kind, url, pwd, category });
     return toCollection(raw);
   }
   const name = (args.name ?? "").trim();
   if (name === "") throw new Error("请输入合集名");
-  const raw = await invokeRaw<RawCollection>("collection_add", { kind, name });
+  const raw = await invokeRaw<RawCollection>("collection_add", { kind, name, category });
   return toCollection(raw);
 }
 
@@ -234,6 +246,20 @@ export async function removeCollection(collection_id: string): Promise<void> {
     collectionId: collection_id,
     collection_id,
   });
+}
+
+/** 设置合集分类：空串即移出分类（未分类）。 */
+export async function setCollectionCategory(
+  collection_id: string,
+  category?: string,
+): Promise<Collection> {
+  const raw = await invokeRaw<RawCollection>("collection_set_category", {
+    id: collection_id,
+    collectionId: collection_id,
+    collection_id,
+    category,
+  });
+  return toCollection(raw);
 }
 
 // ---- 阿里云盘只读命令（沿用旧 channel，参数名不变） ----

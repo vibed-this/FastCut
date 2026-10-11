@@ -4,7 +4,7 @@
  * 落盘路径：`<userDataDir>/fastcut.json`。
  * JSON schema：
  *   `{ config: { target_dir, definition }, ledger: { key: { path, saved_at, template } },
- *      collections: [{ id, kind, name, created_at, share_id?, url?, pwd?, relDir? }] }`
+ *      collections: [{ id, kind, name, created_at, share_id?, url?, pwd?, relDir?, category? }] }`
  * 其中 `target_dir` / `pwd` 无值时写 `null`，`created_at` / `saved_at` 为秒级整数。
  * 旧 `shares` 数组仅在读取时做一次性迁移，不再写回。
  * 本模块不 import electron（便于 vitest 测试）。
@@ -246,6 +246,9 @@ function parseCollection(c: unknown): Collection | null {
   if (typeof c["url"] === "string") out.url = c["url"];
   if (typeof c["pwd"] === "string") out.pwd = c["pwd"];
   if (typeof c["relDir"] === "string") out.relDir = c["relDir"];
+  if (typeof c["category"] === "string" && c["category"].trim() !== "") {
+    out.category = c["category"].trim();
+  }
   return out;
 }
 
@@ -346,6 +349,7 @@ function serializeStoreData(data: StoreData): string {
       url: c.url ?? null,
       pwd: c.pwd ?? null,
       relDir: c.relDir ?? null,
+      category: c.category ?? null,
     })),
   };
   return `${JSON.stringify(normalized, null, 2)}\n`;
@@ -415,6 +419,23 @@ function requireTargetDir(data: StoreData): string {
   const dir = data.config.target_dir?.trim() ?? "";
   if (dir === "") throw new Error("未配置目标文件夹，请先在设置页选择下载目录");
   return dir;
+}
+
+/** 分类名上限（字符数，超长拒绝落盘，保持侧栏可读）。 */
+export const CATEGORY_MAX_LENGTH = 32;
+
+/**
+ * 归一化分类名：去两端空白，空串视为未分类（undefined）。
+ * 超长抛错，调用方透传 message。
+ */
+export function normalizeCategory(raw?: string): string | undefined {
+  if (raw === undefined) return undefined;
+  const clean = raw.trim();
+  if (clean === "") return undefined;
+  if (clean.length > CATEGORY_MAX_LENGTH) {
+    throw new Error(`分类名过长（最多${CATEGORY_MAX_LENGTH}字符）`);
+  }
+  return clean;
 }
 
 export async function getConfig(userDataDir: string): Promise<AppConfig> {
@@ -496,6 +517,8 @@ export async function addCollection(
       url: trimmed,
     };
     if (cleanPwd !== undefined) item.pwd = cleanPwd;
+    const category = normalizeCategory(input.category);
+    if (category !== undefined) item.category = category;
     data.collections.push(item);
     await saveData(userDataDir, data);
     return { ...item };
@@ -514,7 +537,31 @@ export async function addCollection(
     created_at: nowSecs(),
     relDir,
   };
+  const category = normalizeCategory(input.category);
+  if (category !== undefined) item.category = category;
   data.collections.push(item);
+  await saveData(userDataDir, data);
+  return { ...item };
+}
+
+/**
+ * 设置合集分类：空串/缺省即移出分类（未分类）。
+ * 分类名去两端空白，超长抛错；id 不存在抛“合集不存在”。
+ */
+export async function setCollectionCategory(
+  userDataDir: string,
+  id: string,
+  category?: string,
+): Promise<Collection> {
+  const data = await loadData(userDataDir);
+  const item = data.collections.find((c) => c.id === id.trim());
+  if (item === undefined) throw new Error("合集不存在");
+  const clean = normalizeCategory(category);
+  if (clean === undefined) {
+    delete item.category;
+  } else {
+    item.category = clean;
+  }
   await saveData(userDataDir, data);
   return { ...item };
 }

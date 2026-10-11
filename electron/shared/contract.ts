@@ -32,6 +32,8 @@ export interface Collection {
   url?: string;
   pwd?: string | null;
   relDir?: string;
+  /** 合集分类（可选，空/缺省即未分类，落盘缺省写 null）。 */
+  category?: string | null;
 }
 
 /** 本地文件条目：`relPath` 均相对 `target_dir`（posix 风格 `/` 分隔）；`absPath` 为本地绝对路径（供播放/拖拽用）。 */
@@ -129,10 +131,10 @@ export interface DownloadVideoOpts {
   sub_dir: string;
 }
 
-/** collection_add 入参：按 kind 分参。 */
+/** collection_add 入参：按 kind 分参（category 可选，空即未分类）。 */
 export type AddCollectionInput =
-  | { kind: "alipan"; url: string; pwd?: string }
-  | { kind: "xiaohongshu"; name: string };
+  | { kind: "alipan"; url: string; pwd?: string; category?: string }
+  | { kind: "xiaohongshu"; name: string; category?: string };
 
 /** 小红书解析结果（M3，仅视频期）。 */
 export interface XhsParseResult {
@@ -166,6 +168,7 @@ export type IpcChannel =
   | "collection_add"
   | "collection_rename"
   | "collection_remove"
+  | "collection_set_category"
   | "fs_list"
   | "fs_mkdir"
   | "fs_rename"
@@ -194,6 +197,7 @@ export interface IpcParams {
   collection_add: AddCollectionInput;
   collection_rename: { id: string; name: string };
   collection_remove: { id: string };
+  collection_set_category: { id: string; category?: string };
   fs_list: { relDir?: string };
   fs_mkdir: { relDir: string };
   fs_rename: { relPath: string; name: string };
@@ -248,6 +252,7 @@ export interface IpcResult {
   collection_add: Collection;
   collection_rename: Collection;
   collection_remove: void;
+  collection_set_category: Collection;
   fs_list: LocalItem[];
   fs_mkdir: void;
   fs_rename: void;

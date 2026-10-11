@@ -70,6 +70,7 @@ export type Action =
   | { type: "collections/set"; collections: Collection[] }
   | { type: "collections/add"; collection: Collection }
   | { type: "collections/rename"; collection_id: string; name: string }
+  | { type: "collections/category"; collection_id: string; category?: string }
   | { type: "collections/remove"; collection_id: string }
   | { type: "material/set"; dir: string }
   | { type: "error/set"; message: string | null }
@@ -144,6 +145,15 @@ export function reducer(state: AppState, action: Action): AppState {
           state.explorer !== null && state.explorer.collection_id === action.collection_id
             ? { ...state.explorer, collection_name: action.name }
             : state.explorer,
+      };
+    case "collections/category":
+      return {
+        ...state,
+        collections: state.collections.map((s) =>
+          s.collection_id === action.collection_id
+            ? { ...s, category: action.category?.trim() === "" ? undefined : action.category }
+            : s,
+        ),
       };
     case "collections/remove": {
       const collections = state.collections.filter(

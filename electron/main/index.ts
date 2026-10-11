@@ -27,6 +27,7 @@ import {
   listCollections,
   removeCollection,
   renameCollection,
+  setCollectionCategory,
   setConfig,
   setIsDownloadingProvider,
   type Collection as StoreCollection,
@@ -87,6 +88,17 @@ function registerIpcHandlers(userDataDir: string): void {
       throw new Error(errMsg(e));
     }
   });
+
+  ipcMain.handle(
+    "collection_set_category",
+    async (_e, args: { id: string; category?: string }) => {
+      try {
+        return toIpcCollection(await setCollectionCategory(userDataDir, args.id, args.category));
+      } catch (e) {
+        throw new Error(errMsg(e));
+      }
+    },
+  );
 
   ipcMain.handle("collection_remove", async (_e, args: { id: string }) => {
     try {

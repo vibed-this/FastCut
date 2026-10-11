@@ -190,6 +190,52 @@ describe("collection rename/remove", () => {
     expect(again.error).toBe("合集不存在");
   });
 
+  it("set-category 设置与清空分类", async () => {
+    collectionDeps.fetchShareName = stubShareName();
+    const added: CliResult = await collectionCommand.run(ctx(), [
+      "add",
+      "alipan",
+      "--url",
+      "https://www.alipan.com/s/catcli",
+      "--category",
+      "学习",
+    ]);
+    expect(added.code).toBe(0);
+    expect((added.data as Collection).category).toBe("学习");
+
+    const listed: CliResult = await collectionCommand.run(ctx(), ["list"]);
+    expect(listed.code).toBe(0);
+    expect(listed.human).toContain("[学习]");
+
+    const updated: CliResult = await collectionCommand.run(ctx(), [
+      "set-category",
+      "--id",
+      "catcli",
+      "--category",
+      "素材",
+    ]);
+    expect(updated.code).toBe(0);
+    expect((updated.data as Collection).category).toBe("素材");
+
+    const cleared: CliResult = await collectionCommand.run(ctx(), [
+      "set-category",
+      "--id",
+      "catcli",
+    ]);
+    expect(cleared.code).toBe(0);
+    expect((cleared.data as Collection).category).toBeUndefined();
+
+    const missing: CliResult = await collectionCommand.run(ctx(), [
+      "set-category",
+      "--id",
+      "nope",
+      "--category",
+      "x",
+    ]);
+    expect(missing.code).toBe(2);
+    expect(missing.error).toBe("合集不存在");
+  });
+
   it("删除 alipan 合集后清掉其缩略图缓存", async () => {
     collectionDeps.fetchShareName = stubShareName();
     const added: CliResult = await collectionCommand.run(ctx(), [

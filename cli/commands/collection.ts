@@ -13,13 +13,14 @@ import {
   listCollections,
   removeCollection,
   renameCollection,
+  setCollectionCategory,
 } from "../../electron/main/store.js";
 import { clearShareThumbnails } from "../../electron/main/thumbnail-cache.js";
 import type { Collection } from "../../electron/shared/contract.js";
 import type { CliCommand, CliContext, CliResult } from "../lib/context.js";
 
 /** 用法行（与 `collectionCommand.usage` 保持一致）。 */
-const USAGE = "collection <list|add|rename|remove> [args]";
+const USAGE = "collection <list|add|rename|remove|set-category> [args]";
 
 /**
  * `add alipan` 分享名查询的可注入依赖。
@@ -51,9 +52,15 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** 合集列表渲染为 `id kind name` 行。 */
+/** 合集列表渲染为 `id kind name` 行（有分类时追加 ` [分类]`）。 */
 function renderList(items: Collection[]): string {
-  return items.map((c: Collection): string => `${c.id} ${c.kind} ${c.name}`).join("\n");
+  return items
+    .map((c: Collection): string => {
+      const base = `${c.id} ${c.kind} ${c.name}`;
+      const category = c.category?.trim() ?? "";
+      return category === "" ? base : `${base} [${category}]`;
+    })
+    .join("\n");
 }
 
 async function runList(ctx: CliContext): Promise<CliResult> {
@@ -72,6 +79,7 @@ async function runAddAlipan(
   ctx: CliContext,
   url: string | undefined,
   pwd: string | undefined,
+  category: string | undefined,
 ): Promise<CliResult> {
   if (url === undefined) {
     return usageError("缺少参数：--url <url>");
@@ -79,7 +87,7 @@ async function runAddAlipan(
   try {
     const item: Collection = await addCollection(
       ctx.userDataDir,
-      pwd === undefined ? { kind: "alipan", url } : { kind: "alipan", url, pwd },
+      { kind: "alipan", url, pwd, category },
       collectionDeps.fetchShareName === undefined
         ? undefined
         : { fetchShareName: collectionDeps.fetchShareName },
@@ -90,15 +98,39 @@ async function runAddAlipan(
   }
 }
 
-async function runAddXhs(ctx: CliContext, name: string | undefined): Promise<CliResult> {
+async function runAddXhs(
+  ctx: CliContext,
+  name: string | undefined,
+  category: string | undefined,
+): Promise<CliResult> {
   if (name === undefined) {
     return usageError("缺少参数：--name <name>");
   }
   try {
-    const item: Collection = await addCollection(ctx.userDataDir, { kind: "xiaohongshu", name });
+    const item: Collection = await addCollection(
+      ctx.userDataDir,
+      category === undefined ? { kind: "xiaohongshu", name } : { kind: "xiaohongshu", name, category },
+    );
     return { code: 0, human: `已添加合集 ${item.id}（${item.name}）`, data: item };
   } catch (e) {
     return opError(errMsg(e), "ADD_FAILED");
+  }
+}
+
+async function runSetCategory(
+  ctx: CliContext,
+  id: string | undefined,
+  category: string | undefined,
+): Promise<CliResult> {
+  if (id === undefined) {
+    return usageError("缺少参数：--id <id>");
+  }
+  try {
+    const item: Collection = await setCollectionCategory(ctx.userDataDir, id, category);
+    const suffix = item.category?.trim() === "" || item.category == null ? "（未分类）" : `（分类：${item.category}）`;
+    return { code: 0, human: `已设置合集 ${item.id} ${suffix}`, data: item };
+  } catch (e) {
+    return opError(errMsg(e), "SET_CATEGORY_FAILED");
   }
 }
 
@@ -146,6 +178,7 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
   let pwd: string | undefined;
   let id: string | undefined;
   let name: string | undefined;
+  let category: string | undefined;
   try {
     const parsed = parseArgs({
       args: argv,
@@ -154,6 +187,7 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
         url: { type: "string" },
         pwd: { type: "string" },
         name: { type: "string" },
+        category: { type: "string" },
         help: { type: "boolean", default: false },
       },
       allowPositionals: true,
@@ -166,6 +200,7 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
     pwd = parsed.values.pwd;
     id = parsed.values.id;
     name = parsed.values.name;
+    category = parsed.values.category;
   } catch (e) {
     return usageError(errMsg(e));
   }
@@ -189,14 +224,14 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
           const extra: string = positionals[2] as string;
           return usageError(`未知参数：${extra}`);
         }
-        return runAddAlipan(ctx, url, pwd);
+        return runAddAlipan(ctx, url, pwd, category);
       }
       if (kind === "xhs") {
         if (positionals.length > 2) {
           const extra: string = positionals[2] as string;
           return usageError(`未知参数：${extra}`);
         }
-        return runAddXhs(ctx, name);
+        return runAddXhs(ctx, name, category);
       }
       return usageError(`未知类型：${kind}（仅支持 alipan|xhs）`);
     }
@@ -214,6 +249,13 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
       }
       return runRemove(ctx, id);
     }
+    case "set-category": {
+      if (positionals.length > 1) {
+        const extra: string = positionals[1] as string;
+        return usageError(`未知参数：${extra}`);
+      }
+      return runSetCategory(ctx, id, category);
+    }
     default: {
       if (sub === undefined) {
         return usageError("缺少子命令");
@@ -223,10 +265,10 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
   }
 }
 
-/** `collection` 子命令：`collection <list|add|rename|remove> [args]`。 */
+/** `collection` 子命令：`collection <list|add|rename|remove|set-category> [args]`。 */
 export const collectionCommand: CliCommand = {
   name: "collection",
-  describe: "管理合集：查询、新增、重命名与删除",
+  describe: "管理合集：查询、新增、重命名、删除与分类",
   usage: USAGE,
   run,
 };

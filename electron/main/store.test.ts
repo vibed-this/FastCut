@@ -18,12 +18,14 @@ import {
   ledgerKey,
   legacyStorePath,
   listCollections,
+  normalizeCategory,
   normalizeDefinition,
   nowSecs,
   parseShareUrl,
   recordLedger,
   removeCollection,
   renameCollection,
+  setCollectionCategory,
   setConfig,
   setIsDownloadingProvider,
   STORE_FILE,
@@ -192,6 +194,7 @@ describe("collections 增删改（alipan）", () => {
       url: "https://www.alipan.com/s/wDtnwT8ErHW",
       pwd: null,
       relDir: null,
+      category: null,
     });
     await expect(listCollections(dir)).resolves.toEqual([item]);
   });
@@ -467,5 +470,84 @@ describe("旧数据迁移", () => {
     const cfg = await getConfig(dir);
     expect(typeof cfg.definition).toBe("string");
     expect(homedir()).toBeTruthy();
+  });
+});
+
+describe("collections 分类（category，可空）", () => {
+  const fetchShareName = async (shareId: string): Promise<string> => `分享-${shareId}`;
+
+  it("normalizeCategory 去空白，空串视为未分类，超长抛错", () => {
+    expect(normalizeCategory(undefined)).toBeUndefined();
+    expect(normalizeCategory("  学习 ")).toBe("学习");
+    expect(normalizeCategory("   ")).toBeUndefined();
+    expect(() => normalizeCategory("a".repeat(33))).toThrow("分类名过长");
+  });
+
+  it("addCollection 可带分类落盘，无分类时不写字段", async () => {
+    const withCat = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/cat1", category: "  学习 " },
+      { fetchShareName },
+    );
+    expect(withCat.category).toBe("学习");
+    const plain = await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/cat2" },
+      { fetchShareName },
+    );
+    expect(plain.category).toBeUndefined();
+    const raw = await readRaw();
+    const collections = raw["collections"] as Array<Record<string, unknown>>;
+    expect(collections.find((c) => c["id"] === "cat1")?.["category"]).toBe("学习");
+    expect(collections.find((c) => c["id"] === "cat2")?.["category"]).toBeNull();
+  });
+
+  it("setCollectionCategory 设置/清空/不存在报错", async () => {
+    await addCollection(
+      dir,
+      { kind: "alipan", url: "https://www.alipan.com/s/catset" },
+      { fetchShareName },
+    );
+    const updated = await setCollectionCategory(dir, "catset", "素材");
+    expect(updated.category).toBe("素材");
+    await expect(listCollections(dir)).resolves.toEqual([updated]);
+    const cleared = await setCollectionCategory(dir, "catset", "   ");
+    expect(cleared.category).toBeUndefined();
+    await expect(setCollectionCategory(dir, "missing", "x")).rejects.toThrow("合集不存在");
+    await expect(setCollectionCategory(dir, "catset", "b".repeat(40))).rejects.toThrow(
+      "分类名过长",
+    );
+  });
+
+  it("旧落盘无 category 字段时读出为未分类", async () => {
+    await writeFile(
+      storeFile(),
+      JSON.stringify({
+        config: { target_dir: null, definition: "AUTO" },
+        ledger: {},
+        collections: [
+          {
+            id: "old1",
+            kind: "alipan",
+            name: "旧",
+            created_at: 11,
+            share_id: "old1",
+            url: "https://www.alipan.com/s/old1",
+            pwd: null,
+            relDir: null,
+          },
+        ],
+      }),
+    );
+    await expect(listCollections(dir)).resolves.toEqual([
+      {
+        id: "old1",
+        kind: "alipan",
+        name: "旧",
+        created_at: 11,
+        share_id: "old1",
+        url: "https://www.alipan.com/s/old1",
+      },
+    ]);
   });
 });

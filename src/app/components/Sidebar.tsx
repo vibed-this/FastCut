@@ -1,10 +1,13 @@
-/** 侧边栏：合集列表的展示与管理入口。 */
-import { useRef, useState } from "react";
+/** 侧边栏：合集列表的展示与管理入口（搜索 + 按分类可折叠分组）。 */
+import { useMemo, useRef, useState } from "react";
 import {
   App as AntdApp,
+  AutoComplete,
   Button,
+  Collapse,
   Divider,
   Dropdown,
+  Empty,
   Input,
   List,
   Modal,
@@ -18,7 +21,15 @@ import {
   EllipsisOutlined,
   PlusOutlined,
 } from "@ant-design/icons";
-import { addCollection, pickFolder, readClipboardText, removeCollection, renameCollection, setConfig } from "../api";
+import {
+  addCollection,
+  pickFolder,
+  readClipboardText,
+  removeCollection,
+  renameCollection,
+  setCollectionCategory,
+  setConfig,
+} from "../api";
 import type { Collection, CollectionKind } from "../api";
 import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore } from "../store";
@@ -33,6 +44,18 @@ interface AddFormState {
   pwd: string;
   /** 小红书合集名。 */
   name: string;
+  /** 合集分类（可选，空即未分类）。 */
+  category: string;
+}
+
+/** 未分类分组的内部 key（分类名本身作其他分组 key，空分类用此占位）。 */
+const UNCATEGORIZED_KEY = "__uncategorized__";
+/** 未分类分组的展示标题。 */
+const UNCATEGORIZED_TITLE = "未分类";
+
+/** 取合集的归一化分类名（去空白，空即 ""）。 */
+function categoryOf(c: Collection): string {
+  return (c.category ?? "").trim();
 }
 
 /** 侧边栏组件属性。 */
@@ -57,15 +80,20 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     url: "",
     pwd: "",
     name: "",
+    category: "",
   });
   const [addError, setAddError] = useState("");
   const [addLoading, setAddLoading] = useState(false);
   /** 新建弹窗表单是否仍是打开时的初始值（剪贴板自动填入只动 pristine 表单，不覆盖用户输入）。 */
   const addPristineRef = useRef(true);
+  /** 顶部搜索框：按合集名称过滤（大小写不敏感）。 */
+  const [query, setQuery] = useState("");
+  /** 展开中的分組 key：null 即全部展开（初始态）；搜索时强制全展。 */
+  const [openKeys, setOpenKeys] = useState<string[] | null>(null);
 
   /** 打开新建合集弹窗：重置表单后读剪贴板，命中分享链接自动填入。 */
   function handleOpenAdd(): void {
-    setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
+    setAddForm({ kind: "alipan", url: "", pwd: "", name: "", category: "" });
     setAddError("");
     addPristineRef.current = true;
     setAddOpen(true);
@@ -76,16 +104,20 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
       }
       addPristineRef.current = false;
       if (hit.kind === "alipan") {
-        setAddForm({ kind: "alipan", url: hit.url, pwd: hit.pwd ?? "", name: "" });
+        setAddForm({ kind: "alipan", url: hit.url, pwd: hit.pwd ?? "", name: "", category: "" });
       } else {
         // 小红书新建只需合集名：切到对应页，链接后续在导入弹窗自动填入
-        setAddForm({ kind: "xiaohongshu", url: "", pwd: "", name: "" });
+        setAddForm({ kind: "xiaohongshu", url: "", pwd: "", name: "", category: "" });
       }
     });
   }
   const [renameTarget, setRenameTarget] = useState<Collection | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
+  /** 设置分类弹窗的目标合集与输入值（空即移出分类）。 */
+  const [categoryTarget, setCategoryTarget] = useState<Collection | null>(null);
+  const [categoryValue, setCategoryValue] = useState("");
+  const [categoryLoading, setCategoryLoading] = useState(false);
 
   /** 点击条目打开合集（单视图，直接切换）。 */
   function handleOpen(collection: Collection): void {
@@ -100,6 +132,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     setAddError("");
     setAddLoading(true);
     try {
+      const category = addForm.category.trim() === "" ? undefined : addForm.category.trim();
       if (addForm.kind === "alipan") {
         const url = addForm.url.trim();
         if (url === "") {
@@ -107,7 +140,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           return;
         }
         const pwd = addForm.pwd.trim() === "" ? undefined : addForm.pwd.trim();
-        const created = await addCollection("alipan", { url, pwd });
+        const created = await addCollection("alipan", { url, pwd, category });
         dispatch({ type: "collections/add", collection: created });
         dispatch({ type: "explorer/open", collection: created });
       } else {
@@ -116,12 +149,12 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           setAddError("请输入合集名");
           return;
         }
-        const created = await addCollection("xiaohongshu", { name });
+        const created = await addCollection("xiaohongshu", { name, category });
         dispatch({ type: "collections/add", collection: created });
         dispatch({ type: "explorer/open", collection: created });
       }
       setAddOpen(false);
-      setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
+      setAddForm({ kind: "alipan", url: "", pwd: "", name: "", category: "" });
     } catch (e) {
       // 行内报错，不抛全局
       setAddError(e instanceof Error ? e.message : String(e));
@@ -179,6 +212,28 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
   }
 
+  /** 提交设置分类（空即移出分类）。 */
+  async function handleCategoryConfirm(): Promise<void> {
+    if (categoryTarget === null) {
+      return;
+    }
+    setCategoryLoading(true);
+    try {
+      const category = categoryValue.trim() === "" ? undefined : categoryValue.trim();
+      await setCollectionCategory(categoryTarget.collection_id, category);
+      dispatch({
+        type: "collections/category",
+        collection_id: categoryTarget.collection_id,
+        category,
+      });
+      setCategoryTarget(null);
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCategoryLoading(false);
+    }
+  }
+
   /** 确认删除合集（收纳在更多菜单内，二次确认）。 */
   function confirmRemove(collection: Collection): void {
     const isXhs = collection.kind === "xiaohongshu";
@@ -223,6 +278,58 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
 
   const emptyMaterial = state.materialDir === "";
 
+  /** 已存在的分类（去重排序，供新建/设置时联想）。 */
+  const existingCategories = useMemo<string[]>(() => {
+    const set = new Set<string>();
+    for (const c of state.collections) {
+      const name = categoryOf(c);
+      if (name !== "") {
+        set.add(name);
+      }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  }, [state.collections]);
+
+  /** 搜索过滤后的合集（仅按名称，大小写不敏感）。 */
+  const filtered = useMemo<Collection[]>(() => {
+    const q = query.trim().toLowerCase();
+    if (q === "") {
+      return state.collections;
+    }
+    return state.collections.filter((c) => c.name.toLowerCase().includes(q));
+  }, [state.collections, query]);
+
+  /** 按分类分组：已分类按名称排序在前，未分类沉底。 */
+  const groups = useMemo<{ key: string; title: string; items: Collection[] }[]>(() => {
+    const byCategory = new Map<string, Collection[]>();
+    const uncategorized: Collection[] = [];
+    for (const c of filtered) {
+      const name = categoryOf(c);
+      if (name === "") {
+        uncategorized.push(c);
+      } else {
+        const arr = byCategory.get(name);
+        if (arr === undefined) {
+          byCategory.set(name, [c]);
+        } else {
+          arr.push(c);
+        }
+      }
+    }
+    const out = [...byCategory.entries()]
+      .sort(([a], [b]) => a.localeCompare(b, "zh-Hans-CN"))
+      .map(([title, items]) => ({ key: title, title, items }));
+    if (uncategorized.length > 0) {
+      out.push({ key: UNCATEGORIZED_KEY, title: UNCATEGORIZED_TITLE, items: uncategorized });
+    }
+    return out;
+  }, [filtered]);
+
+  const groupKeys = useMemo(() => groups.map((g) => g.key), [groups]);
+  const searching = query.trim() !== "";
+  // 搜索时强制全展；平时 null 即全展，用户折叠后走受控值。
+  const activeKey = searching ? groupKeys : (openKeys ?? groupKeys);
+
   function renderRow(collection: Collection): React.JSX.Element {
     const active = state.activeCollectionId === collection.collection_id;
     const icon =
@@ -256,6 +363,14 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                   onClick: () => {
                     setRenameTarget(collection);
                     setRenameName(collection.name);
+                  },
+                },
+                {
+                  key: "category",
+                  label: "设置分类",
+                  onClick: () => {
+                    setCategoryTarget(collection);
+                    setCategoryValue(categoryOf(collection));
                   },
                 },
                 {
@@ -303,6 +418,17 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     <div className={className} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <style>{`.collection-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s}
 .collection-list-item:hover .ant-list-item-action,.collection-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
+      <div style={{ padding: "12px 12px 0" }}>
+        <Input.Search
+          data-testid="collection-search-input"
+          placeholder="搜索集合名称"
+          allowClear
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+          }}
+        />
+      </div>
       <div style={{ padding: 12 }}>
         <Button
           data-testid="add-collection-btn"
@@ -317,11 +443,38 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
         </Button>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
-        <List
-          dataSource={state.collections}
-          locale={{ emptyText: "暂无合集，请先新建" }}
-          renderItem={renderRow}
-        />
+        {state.collections.length === 0 ? (
+          <Empty description="暂无合集，请先新建" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : filtered.length === 0 ? (
+          <Empty description="无匹配的合集" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        ) : (
+          <Collapse
+            data-testid="collection-category-collapse"
+            ghost
+            size="small"
+            activeKey={activeKey}
+            onChange={(keys) => {
+              setOpenKeys(Array.isArray(keys) ? [...keys] : [keys]);
+            }}
+            items={groups.map((g) => ({
+              key: g.key,
+              label: (
+                <Typography.Text
+                  data-testid="collection-category-header"
+                  strong
+                  ellipsis
+                  style={{ maxWidth: 160 }}
+                  title={g.title}
+                >
+                  {g.title}（{g.items.length}）
+                </Typography.Text>
+              ),
+              children: (
+                <List dataSource={g.items} locale={{ emptyText: " " }} renderItem={renderRow} />
+              ),
+            }))}
+          />
+        )}
       </div>
       <Divider style={{ margin: "4px 0 0" }} />
       <div style={{ padding: "8px 12px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -419,6 +572,24 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
               />
             </div>
           )}
+          <div>
+            <div style={{ marginBottom: 6 }}>分类（可选，空即未分类）</div>
+            <AutoComplete
+              style={{ width: "100%" }}
+              options={existingCategories.map((c) => ({ value: c }))}
+              value={addForm.category}
+              onChange={(v) => {
+                addPristineRef.current = false;
+                setAddForm((s) => ({ ...s, category: v }));
+              }}
+            >
+              <Input
+                data-testid="add-collection-category-input"
+                placeholder="例如：学习、素材"
+                maxLength={32}
+              />
+            </AutoComplete>
+          </div>
           {addError !== "" ? <Typography.Text type="danger">{addError}</Typography.Text> : null}
         </div>
       </Modal>
@@ -442,6 +613,40 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
             setRenameName(e.target.value);
           }}
         />
+      </Modal>
+      <Modal
+        title={`设置分类${categoryTarget !== null ? `：${categoryTarget.name}` : ""}`}
+        open={categoryTarget !== null}
+        confirmLoading={categoryLoading}
+        okText="保存"
+        cancelText="取消"
+        okButtonProps={{ "data-testid": "set-category-confirm" }}
+        onOk={() => {
+          void handleCategoryConfirm();
+        }}
+        onCancel={() => {
+          setCategoryTarget(null);
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <AutoComplete
+            style={{ width: "100%" }}
+            options={existingCategories.map((c) => ({ value: c }))}
+            value={categoryValue}
+            onChange={(v) => {
+              setCategoryValue(v);
+            }}
+          >
+            <Input
+              data-testid="set-category-input"
+              placeholder="输入分类名，留空即移出分类"
+              maxLength={32}
+            />
+          </AutoComplete>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            分类可为空；输入新名称即新建分类。
+          </Typography.Text>
+        </div>
       </Modal>
     </div>
   );
