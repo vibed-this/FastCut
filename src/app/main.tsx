@@ -12,6 +12,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <App />
         </StoreProvider>
       </AntApp>
-    </ConfigProvider>,
+    </ConfigProvider>
   </React.StrictMode>,
 );
