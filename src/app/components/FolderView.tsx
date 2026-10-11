@@ -1,5 +1,5 @@
 /** 文件夹浏览：面包屑 + 缩略图网格。 */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Badge, Breadcrumb, Button, Space, Spin, Typography } from "antd";
 import { FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
 import { getStatusBatch, listShare } from "../api";
@@ -143,11 +143,17 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabId, stackKey]);
 
-  // 下载进度变化后刷新该 tab 状态
+  // 下载进度变化后刷新该 tab 状态（含完成清空后终查一次，落"已保存"角标）；
+  // 用 ref 跳过挂载首跑（load 已查过），key 未变（纯 done/total 推进）不重查。
+  const prevProgressKey = useRef("");
   useEffect(() => {
-    if (progressKey === "" || tab === undefined || items.length === 0) {
+    if (tab === undefined || items.length === 0) {
       return;
     }
+    if (progressKey === prevProgressKey.current) {
+      return;
+    }
+    prevProgressKey.current = progressKey;
     let cancelled = false;
     void getStatusBatch(
       tab.share_id,
