@@ -330,9 +330,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 是否为限流错误（命中即退避重试一次）。 */
+/** 是否为限流错误（命中即退避重试一次）。站方实际形状有两种：
+ * code=TooManyRequests，或 code=BlockException 且 message 内为 rule:TooManyRequests。 */
 export function is_too_many_requests(err: unknown): boolean {
-  return err instanceof ShareApiError && err.code === "TooManyRequests";
+  if (!(err instanceof ShareApiError)) {
+    return false;
+  }
+  if (err.code === "TooManyRequests") {
+    return true;
+  }
+  return err.code === "BlockException" && err.message.includes("TooManyRequests");
 }
 export const isTooManyRequests = is_too_many_requests;
 

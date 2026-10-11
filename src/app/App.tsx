@@ -24,6 +24,27 @@ export default function App(): React.JSX.Element {
   const { state, dispatch } = useStore();
   const { message } = AntdApp.useApp();
 
+  // 右侧打开的合集 id 记忆：activeIdRef 供启动恢复时判断用户是否已手动打开；
+  // restoredRef 保证恢复完成前不写记忆（挂载瞬间 id 为初始 null，直接写会清掉上次记录）。
+  const activeCollectionId = state.activeCollectionId;
+  const activeIdRef = useRef<string | null>(activeCollectionId);
+  activeIdRef.current = activeCollectionId;
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!restoredRef.current || typeof localStorage === "undefined") {
+      return;
+    }
+    try {
+      if (activeCollectionId === null) {
+        localStorage.removeItem(ACTIVE_COLLECTION_KEY);
+      } else {
+        localStorage.setItem(ACTIVE_COLLECTION_KEY, activeCollectionId);
+      }
+    } catch {
+      // 存储不可用时忽略，下次回到空状态。
+    }
+  }, [activeCollectionId]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -35,13 +56,15 @@ export default function App(): React.JSX.Element {
         dispatch({ type: "collections/set", collections });
         dispatch({ type: "material/set", dir: cfg.target_dir ?? "" });
         // 恢复上次打开的合集（仅当它还在列表里；回到根目录，不恢复深层浏览栈）。
-        if (typeof localStorage !== "undefined") {
+        // 若加载期间用户已手动打开（activeIdRef 非空），以用户的选择为准，不覆盖。
+        if (activeIdRef.current === null && typeof localStorage !== "undefined") {
           const lastId = loadActiveCollectionId(() => localStorage.getItem(ACTIVE_COLLECTION_KEY));
           const target = lastId === null ? undefined : collections.find((c) => c.collection_id === lastId);
           if (target !== undefined) {
             dispatch({ type: "explorer/open", collection: target });
           }
         }
+        restoredRef.current = true;
       } catch (e) {
         if (!cancelled) {
           void message.error(e instanceof Error ? e.message : String(e));
@@ -56,23 +79,6 @@ export default function App(): React.JSX.Element {
 
   const emptyMaterial = state.materialDir === "";
   const explorer = state.explorer;
-
-  // 右侧打开的合集 id：变更即记入 localStorage；关闭或合集被删后清除。
-  const activeCollectionId = state.activeCollectionId;
-  useEffect(() => {
-    if (typeof localStorage === "undefined") {
-      return;
-    }
-    try {
-      if (activeCollectionId === null) {
-        localStorage.removeItem(ACTIVE_COLLECTION_KEY);
-      } else {
-        localStorage.setItem(ACTIVE_COLLECTION_KEY, activeCollectionId);
-      }
-    } catch {
-      // 存储不可用时忽略，下次回到空状态。
-    }
-  }, [activeCollectionId]);
 
   // 左侧栏宽度：可拖拽调整，记忆到 localStorage。
   const [siderWidth, setSiderWidth] = useState<number>(() =>

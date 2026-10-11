@@ -289,4 +289,39 @@ describe("listShare 请求形状", () => {
     await expect(client.listShare("root")).resolves.toMatchObject({ next_marker: "" });
     expect(listCalls).toBe(2);
   });
+
+  it("BlockException+rule:TooManyRequests 同样退避重试（站方实际限流形状）", async () => {
+    let listCalls = 0;
+    const fetchFn = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith("get_share_token")) {
+        return jsonResponse({ share_token: "t", expires_in: 7200 });
+      }
+      listCalls += 1;
+      if (listCalls === 1) {
+        return jsonResponse({ code: "BlockException", message: "rule:TooManyRequests" }, 429);
+      }
+      return jsonResponse({ items: [], next_marker: "" });
+    });
+    const client = new ShareClient("retry-block", undefined, fetchFn as typeof fetch);
+    await expect(client.listShare("root")).resolves.toMatchObject({ next_marker: "" });
+    expect(listCalls).toBe(2);
+  });
+
+  it("BlockException 其他 rule 不重试、直接透出", async () => {
+    let listCalls = 0;
+    const fetchFn = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith("get_share_token")) {
+        return jsonResponse({ share_token: "t", expires_in: 7200 });
+      }
+      listCalls += 1;
+      return jsonResponse({ code: "BlockException", message: "rule:OtherRule" }, 403);
+    });
+    const client = new ShareClient("noretry-block", undefined, fetchFn as typeof fetch);
+    await expect(client.listShare("root")).rejects.toThrow(
+      "接口错误（BlockException）：rule:OtherRule",
+    );
+    expect(listCalls).toBe(1);
+  });
 });

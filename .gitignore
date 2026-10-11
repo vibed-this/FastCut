@@ -16,6 +16,9 @@ release/
 # e2e 走查截图（每次运行重新生成，不入库）
 e2e/shots/
 
+# playwright 输出目录（每次运行重新生成，不入库）
+test-results/
+
 # local env, secrets, tokens, credentials
 .env
 .env.*

@@ -108,6 +108,47 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
   }, [openKeys]);
 
+  /**
+   * 打开变化时定位选中行：所在分组折叠就先展开（下一轮再滚），
+   * 否则若已完全可见就不动，不可见才居中。只认 id 变化，
+   * 用户平时折叠/滚动浏览时不会被拽回。
+   */
+  const scrolledForRef = useRef<string | null>(null);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const id = state.activeCollectionId;
+    if (id === null || scrolledForRef.current === id) {
+      return;
+    }
+    const hit = state.collections.find((c) => c.collection_id === id);
+    if (hit === undefined) {
+      return;
+    }
+    const cat = categoryOf(hit);
+    const key = cat === "" ? UNCATEGORIZED_KEY : cat;
+    if (openKeys !== null && !openKeys.includes(key)) {
+      setOpenKeys([...openKeys, key]);
+      return;
+    }
+    const t = requestAnimationFrame(() => {
+      const el = document.getElementById("active-collection-item");
+      if (el === null) {
+        return;
+      }
+      const container = listScrollRef.current;
+      if (container !== null) {
+        const r = el.getBoundingClientRect();
+        const c = container.getBoundingClientRect();
+        if (r.top >= c.top && r.bottom <= c.bottom) {
+          return;
+        }
+      }
+      el.scrollIntoView({ block: "center" });
+    });
+    scrolledForRef.current = id;
+    return () => cancelAnimationFrame(t);
+  }, [state.activeCollectionId, state.collections, openKeys]);
+
   /** 打开新建合集弹窗：重置表单后读剪贴板，命中分享链接自动填入。 */
   function handleOpenAdd(): void {
     setAddForm({ kind: "alipan", url: "", pwd: "", name: "", category: "" });
@@ -419,6 +460,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           title={
             <Typography.Text
               data-testid="collection-item"
+              id={active ? "active-collection-item" : undefined}
               ellipsis
               style={{ maxWidth: "100%" }}
               title={collection.name}
@@ -459,7 +501,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           新建合集
         </Button>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
+      <div ref={listScrollRef} style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
         {state.collections.length === 0 ? (
           <Empty description="暂无合集，请先新建" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : filtered.length === 0 ? (

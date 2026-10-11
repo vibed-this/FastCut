@@ -36,6 +36,7 @@ export type {
   UnlistenFn,
   VideoPreview,
 } from "../../electron/shared/contract";
+import { withRateLimitRetry } from "./rateLimit";
 
 // ---- 合集模型（M4：SavedShare → Collection 改名） ----
 
@@ -275,13 +276,16 @@ export function listShare(
   limit?: number,
   pwd?: string,
 ): Promise<ListShareResult> {
-  return invoke("list_share", {
-    shareId: share_id,
-    parentFileId: parent_file_id,
-    marker,
-    limit,
-    pwd,
-  });
+  // 瞬时限流退避一次（主进程内还有一次 1s 重试）：首屏与翻页统一兜底。
+  return withRateLimitRetry(() =>
+    invoke("list_share", {
+      shareId: share_id,
+      parentFileId: parent_file_id,
+      marker,
+      limit,
+      pwd,
+    }),
+  );
 }
 
 export async function getStatusBatch(
