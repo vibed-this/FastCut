@@ -17,7 +17,9 @@
     "hls.js": "^1.7.3",
     "p-limit": "^7.3.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "xgplayer": "^3.0.26",
+    "xgplayer-hls": "^3.0.26"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",

@@ -1,5 +1,5 @@
 /** 全屏视频播放器 Modal：经典播放器布局（标题栏 + 视频区 + 控制条）。 */
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Typography } from "antd";
 import { CloseOutlined, FullscreenOutlined } from "@ant-design/icons";
 
@@ -9,6 +9,10 @@ export interface VideoPlayerModalProps {
   open: boolean;
   /** 顶部标题栏文案（一般为文件名）。 */
   title: string;
+  /** 标题栏右侧操作区（全屏按钮之前，如保存按钮）。 */
+  actions?: ReactNode;
+  /** 视频宽高比（w/h）：窗口按比例自适应，消除黑边；null 时用默认尺寸。 */
+  videoRatio?: number | null;
   /** 关闭回调：ESC、遮罩点击、关闭按钮统一走这里。 */
   onClose: () => void;
   /** 中部视频区：调用方传入已接好播放源的 <video> 元素。 */
@@ -28,8 +32,36 @@ export interface VideoPlayerModalProps {
  * @returns 播放器元素，关闭时返回 null
  */
 export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JSX.Element | null {
-  const { open, title, onClose, children, footer } = props;
+  const { open, title, actions, videoRatio, onClose, children, footer } = props;
   const boxRef = useRef<HTMLDivElement | null>(null);
+  // 窗口尺寸：按视频比例自适应（消除黑边），约束在视口内；无比例时默认尺寸。
+  const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const fit = (): void => {
+      const titleH = 45;
+      const maxW = Math.min(1000, window.innerWidth * 0.92);
+      const maxH = window.innerHeight * 0.86 - titleH;
+      if (videoRatio === null || videoRatio === undefined || videoRatio <= 0) {
+        setBoxSize({ width: Math.round(maxW), height: Math.round(Math.min(660, maxH)) });
+        return;
+      }
+      let bw = maxW;
+      let bh = bw / videoRatio;
+      if (bh > maxH) {
+        bh = maxH;
+        bw = bh * videoRatio;
+      }
+      setBoxSize({ width: Math.max(320, Math.round(bw)), height: Math.max(240, Math.round(bh)) });
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+    };
+  }, [open, videoRatio]);
 
   /** 全屏按钮：将播放器容器全屏，已全屏则退出。 */
   const toggleFullscreen = useCallback(() => {
@@ -73,7 +105,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
       aria-modal="true"
       aria-label={title}
       onMouseDown={(e) => {
-        // 仅点中遮罩本身才关闭，内容区点击不关闭。
+        // 遮罩透明不可见但仍拦截点击：点中空白处关闭，内容区点击不关闭。
         if (e.target === e.currentTarget) {
           onClose();
         }
@@ -82,7 +114,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         position: "fixed",
         inset: 0,
         zIndex: 2000,
-        background: "rgba(0, 0, 0, 0.85)",
+        background: "transparent",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -93,14 +125,14 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         ref={boxRef}
         data-testid="video-player-box"
         style={{
-          width: "min(1200px, 94vw)",
-          maxHeight: "92vh",
+          width: boxSize === null ? "min(1000px, 92vw)" : boxSize.width,
+          height: boxSize === null ? "min(660px, 86vh)" : boxSize.height,
           background: "#000",
-          borderRadius: 10,
+          borderRadius: 12,
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
-          boxShadow: "0 8px 40px rgba(0, 0, 0, 0.6)",
+          boxShadow: "0 18px 70px rgba(0, 0, 0, 0.65)",
         }}
       >
         <div
@@ -119,6 +151,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
           >
             {title}
           </Typography.Text>
+          {actions}
           <Button
             data-testid="video-player-fullscreen"
             type="text"
@@ -142,14 +175,14 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
           data-testid="video-player-body"
           style={{
             background: "#000",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            flex: 1,
             minHeight: 0,
-            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
           }}
         >
-          <div style={{ width: "100%", padding: 12 }}>{children}</div>
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{children}</div>
         </div>
         {footer !== undefined ? (
           <div

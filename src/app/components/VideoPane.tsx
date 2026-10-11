@@ -1,7 +1,10 @@
-/** 视频预览与保存面板：全屏 Modal 播放器。 */
+/** 视频预览与保存面板：全屏 Modal + xgplayer 播放器。 */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, App as AntdApp, Button, Space, Spin, Tag, Typography } from "antd";
-import Hls from "hls.js";
+import { Alert, App as AntdApp, Button, Spin, Typography } from "antd";
+import { DownloadOutlined } from "@ant-design/icons";
+import Player from "xgplayer";
+import HlsPlugin from "xgplayer-hls";
+import "xgplayer/dist/index.min.css";
 import { downloadVideo, getStatusBatch, onDownloadDone, onDownloadProgress, videoPreview } from "../api";
 import type { VideoPreview } from "../api";
 import { useStore } from "../store";
@@ -41,6 +44,18 @@ function pickUsableTemplate(templates: VideoPreview[], preference: string): Vide
 }
 
 /**
+ * 可用档（status finished 且有 preview_url）：驱动 xgplayer 清晰度列表。
+ *
+ * @param templates - 预览档列表
+ * @returns 可播放的档
+ */
+function usableTemplates(templates: VideoPreview[]): VideoPreview[] {
+  return templates.filter(
+    (t) => t.status === "finished" && typeof t.preview_url === "string" && t.preview_url.length > 0,
+  );
+}
+
+/**
  * 视频预览面板。
  *
  * @param props - 组件属性
@@ -51,11 +66,13 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const { state, dispatch } = useStore();
   const { message } = AntdApp.useApp();
   const tab = state.tabs.find((t) => t.id === tabId);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<Hls | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const playerRef = useRef<Player | null>(null);
   const [templates, setTemplates] = useState<VideoPreview[]>([]);
   const [playUrl, setPlayUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  /** 视频宽高比（w/h）：loadedmetadata 后回填，Modal 按比例定窗消黑边。 */
+  const [videoRatio, setVideoRatio] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
   const [expiredMsg, setExpiredMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -118,7 +135,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     // 仅在已触发过保存后由事件驱动刷新，此处不主动轮询
   });
 
-  /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢 video。 */
+  /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢容器。 */
   const fetchSeqRef = useRef(0);
 
   /** 拉取可用档与播放地址（单次 preview，本地选档，避免重复打接口）。 */
@@ -128,6 +145,10 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     }
     const seq = fetchSeqRef.current + 1;
     fetchSeqRef.current = seq;
+    // 新文件/偏好重取链：丢弃上一轮播放器内切换的档位记忆与窗口比例。
+    switchUrlRef.current = null;
+    switchTemplateRef.current = null;
+    setVideoRatio(null);
     setLoading(true);
     setExpired(false);
     setExpiredMsg("");
@@ -171,57 +192,89 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey, definition]);
 
-  // 播放器接入：loading 期间 video 会被 skeleton 卸载重挂，必须把 loading
-  // 纳入依赖，否则 playUrl 不变时 effect 不再跑、src 永不设置（黑屏）。
-  // 注意：桌面 Chromium 对 mpegurl 的 canPlayType 返回 "maybe"，但 <video> 直塞
-  // m3u8 在 http(s) origin 下会被 ORB 拦截（dev 必现 media_err=4），因此 m3u8
-  // 一律走 hls.js（cors 拉取），不信任 canPlayType。
+  // xgplayer 接入：playUrl 就绪且不在 loading 期时创建实例（loading 结束容器才稳定挂载），
+  // playUrl / templates / definition 变化时销毁重建，组件卸载时销毁。
+  // 清晰度列表由全部可用档驱动，默认档复用 pickUsableTemplate（AUTO 即最高档）；
+  // 播放器内切换清晰度经 definition_change 回写 playUrl（跳过重建，保存用当前档）。
+  const switchUrlRef = useRef<string | null>(null);
+  const switchTemplateRef = useRef<string | null>(null);
+  /** playUrl 最新值（definition_change 回调闭包内读取，避免过期 state）。 */
+  const playUrlRef = useRef("");
   useEffect(() => {
-    const video = videoRef.current;
-    if (video === null || playUrl === "") {
+    playUrlRef.current = playUrl;
+  }, [playUrl]);
+  useEffect(() => {
+    const container = containerRef.current;
+    if (container === null || loading || playUrl === "") {
       return;
     }
-    // 先销毁旧实例
-    if (hlsRef.current !== null) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
+    if (switchUrlRef.current === playUrl) {
+      // 播放器内切换档位引起的状态同步，实例已在播该地址，无需重建。
+      switchUrlRef.current = null;
+      return;
     }
-    if (playUrl.includes(".m3u8") && Hls.isSupported()) {
-      const hls = new Hls();
-      hlsRef.current = hls;
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) {
-          setExpired(true);
-          const code =
-            data.type === "networkError" && data.response !== undefined
-              ? ` http=${String(data.response.code)}`
-              : "";
-          setExpiredMsg(`hls ${data.type}/${String(data.details)}${code}`);
-        }
-      });
-      hls.loadSource(playUrl);
-      hls.attachMedia(video);
-    } else {
-      video.src = playUrl;
+    const usable = usableTemplates(templates);
+    const picked = pickUsableTemplate(templates, definition) ?? usable[0];
+    if (picked === undefined || picked.preview_url === undefined) {
+      return;
     }
-    return () => {
-      if (hlsRef.current !== null) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
+    const activeTemplate = switchTemplateRef.current ?? picked.template_id;
+    switchTemplateRef.current = null;
+    const player = new Player({
+      el: container,
+      url: playUrl,
+      plugins: [HlsPlugin],
+      definition: {
+        list: usable.map((t) => ({ url: t.preview_url as string, definition: t.template_id })),
+        defaultDefinition: activeTemplate,
+      },
+      playbackRate: [0.5, 1, 1.5, 2],
+      width: "100%",
+      height: "100%",
+      autoplay: false,
+      videoAttributes: { preload: "metadata", crossorigin: "anonymous" },
+    });
+    playerRef.current = player;
+    // 首帧元数据就绪即回填宽高比，Modal 按比例定窗（竖视频竖窗，无黑边）。
+    const innerVideo = container.querySelector("video");
+    const readRatio = (): void => {
+      const v = container.querySelector("video");
+      if (v !== null && v.videoWidth > 0 && v.videoHeight > 0) {
+        setVideoRatio(v.videoWidth / v.videoHeight);
       }
     };
-  }, [playUrl, loading]);
-
-  // tab 关闭时清理由卸载触发，此处兜底卸载销毁
-  useEffect(
-    () => () => {
-      if (hlsRef.current !== null) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
+    if (innerVideo !== null && innerVideo.readyState >= 1) {
+      readRatio();
+    } else {
+      innerVideo?.addEventListener("loadedmetadata", readRatio, { once: true });
+    }
+    player.on("error", (err: unknown) => {
+      setExpired(true);
+      const detail = err instanceof Error ? err.message : String(err ?? "");
+      setExpiredMsg(detail === "" ? "播放失败，点“重取链接”重试" : `播放失败（${detail}），点“重取链接”重试`);
+    });
+    player.on("definition_change", (to: unknown) => {
+      const item = to as { url?: unknown; definition?: unknown } | null | undefined;
+      if (typeof item?.url !== "string" || item.url === "" || item.url === playUrlRef.current) {
+        return;
       }
-    },
-    [],
-  );
+      switchUrlRef.current = item.url;
+      switchTemplateRef.current =
+        typeof item.definition === "string" && item.definition !== "" ? item.definition : null;
+      playUrlRef.current = item.url;
+      setPlayUrl(item.url);
+      dispatch({
+        type: "tabs/video",
+        tabId,
+        video: { url: item.url, template: switchTemplateRef.current ?? "" },
+      });
+    });
+    return () => {
+      container.querySelector("video")?.removeEventListener("loadedmetadata", readRatio);
+      playerRef.current = null;
+      player.destroy();
+    };
+  }, [playUrl, templates, loading, definition]);
 
   if (tab === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
@@ -277,77 +330,70 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       open
       title={file.name}
       onClose={closePreview}
-      footer={
-        <Space>
-          <Button
-            data-testid="save-video"
-            type="primary"
-            loading={saving}
-            disabled={saved || noMaterial}
-            onClick={() => {
-              void handleSave();
-            }}
-          >
-            {saved ? "已保存" : "保存"}
-          </Button>
-          <Button onClick={closePreview}>关闭预览</Button>
-        </Space>
+      videoRatio={videoRatio}
+      actions={
+        <Button
+          data-testid="save-video"
+          type="primary"
+          size="small"
+          icon={<DownloadOutlined />}
+          loading={saving}
+          disabled={saved || noMaterial}
+          title={noMaterial ? "请先在左侧边栏配置素材文件夹" : saved ? "已保存" : "保存当前视频"}
+          onClick={() => {
+            void handleSave();
+          }}
+          style={
+            saved || noMaterial
+              ? { background: "#2a2a2a", borderColor: "#434343", color: "rgba(255, 255, 255, 0.5)" }
+              : undefined
+          }
+        >
+          {saved ? "已保存" : "保存"}
+        </Button>
       }
     >
-      <Space direction="vertical" style={{ width: "100%" }} size={12}>
-        <Spin spinning={loading} tip="加载中…">
-          <video
-            ref={videoRef}
-            data-testid="preview-video"
-            controls
-            preload="metadata"
-            onError={() => {
-              const v = videoRef.current;
-              const code = v?.error ? ` media_err=${v.error.code}` : "";
-              setExpired(true);
-              setExpiredMsg(`video 元素加载失败${code}，点“重取链接”重试`);
+      <div style={{ flex: 1, minHeight: 0, position: "relative", background: "#000" }}>
+        <div
+          ref={containerRef}
+          data-testid="preview-video"
+          style={{ position: "absolute", inset: 0 }}
+        />
+        {loading ? (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "rgba(0, 0, 0, 0.45)",
+              zIndex: 5,
             }}
-            style={{ width: "100%", maxHeight: "60vh", background: "#000" }}
-          />
-        </Spin>
-        <div>
-          <Typography.Text type="secondary" style={{ color: "#bbb" }}>
-            可用清晰度：
-          </Typography.Text>
-          <Space wrap style={{ marginTop: 6 }}>
-            {templates.length === 0 ? (
-              <Typography.Text type="secondary" style={{ color: "#888" }}>
-                暂无可用档
-              </Typography.Text>
-            ) : (
-              templates.map((t) => (
-                <Tag key={t.template_id} color={t.preview_url ? "green" : "default"}>
-                  {t.template_id}
-                  {t.template_width !== undefined ? ` · ${t.template_width}` : ""}
-                </Tag>
-              ))
-            )}
-          </Space>
-        </div>
-        {expired ? (
-          <Alert
-            type="error"
-            message="链接过期请重试"
-            description={expiredMsg === "" ? undefined : expiredMsg}
-            action={
-              <Button
-                size="small"
-                onClick={() => {
-                  void fetchPreview();
-                }}
-              >
-                重取链接
-              </Button>
-            }
-          />
+          >
+            <Spin tip="加载中…" />
+          </div>
         ) : null}
-        {noMaterial ? <Alert type="warning" message="请先在左侧边栏配置素材文件夹后再保存" /> : null}
-      </Space>
+        {expired ? (
+          <div style={{ position: "absolute", left: 12, right: 12, bottom: 76, zIndex: 6 }}>
+            <Alert
+              type="error"
+              message="链接过期请重试"
+              description={expiredMsg === "" ? undefined : expiredMsg}
+              action={
+                <Button
+                  size="small"
+                  onClick={() => {
+                    void fetchPreview();
+                  }}
+                >
+                  重取链接
+                </Button>
+              }
+            />
+          </div>
+        ) : null}
+      </div>
     </VideoPlayerModal>
   );
 }

@@ -309,7 +309,7 @@ test("c. 预览：readyState>=2 且无过期告警", async () => {
   const video = win.locator('[data-testid="preview-video"]');
   await expect(video).toBeVisible({ timeout: 120_000 });
   // 先确认取链路健康：等待转码档出现且 15s 内无过期告警（该段应通过）
-  await expect(win.getByText(/可用清晰度/).first()).toBeVisible({ timeout: 60_000 });
+  await expect(win.locator(".xgplayer").first()).toBeVisible({ timeout: 60_000 });
   await win.waitForTimeout(10_000);
   // 瞬时过期走应用自带“重取链接”恢复一轮，再断言
   if (await ensurePreviewClean(win)) {
@@ -319,9 +319,10 @@ test("c. 预览：readyState>=2 且无过期告警", async () => {
   }
   // 先截一张（readyState 等待若超时失败，此图仍保留现场供肉眼确认）
   await win.screenshot({ path: join(SHOTS, "03-preview.png") });
-  // 触发一次播放以加速首帧缓冲（自动播放策略下 catch 忽略）
+  // 触发一次播放以加速首帧缓冲（自动播放策略下 catch 忽略；
+  // xgplayer 在容器内渲染自己的 <video>，查询容器内的 video 元素）
   await win.evaluate(() => {
-    const v = document.querySelector<HTMLVideoElement>('[data-testid="preview-video"]');
+    const v = document.querySelector<HTMLVideoElement>('[data-testid="preview-video"] video');
     if (v) {
       v.muted = true;
       void v.play().catch(() => undefined);
@@ -329,10 +330,11 @@ test("c. 预览：readyState>=2 且无过期告警", async () => {
   });
   // 注：曾有 player effect 只依赖 [playUrl] 导致 loading 期重挂载后 src 永不设置的
   // 黑屏 bug（Card loading 会卸载 <video>），已修复：effect 依赖改为 [playUrl, loading]。
-  // 以下断言验证修复：readyState 必须达到 >= 2。
+  // 现切换为 xgplayer：容器 div 保留 data-testid="preview-video"，真实 <video> 在其内部，
+  // 以下断言验证修复：容器内 video 的 readyState 必须达到 >= 2。
   await win.waitForFunction(
     () => {
-      const v = document.querySelector<HTMLVideoElement>('[data-testid="preview-video"]');
+      const v = document.querySelector<HTMLVideoElement>('[data-testid="preview-video"] video');
       return v !== null && v.readyState >= 2;
     },
     undefined,
@@ -372,7 +374,7 @@ test("d. 设目标目录并保存：download-done ok 且 mp4 可播放", async (
   await uiLoadAll(win);
   await uiPreviewFile(win, ctx.smallFileName);
   await expect(win.locator('[data-testid="preview-video"]')).toBeVisible({ timeout: 120_000 });
-  await expect(win.getByText(/可用清晰度/).first()).toBeVisible({ timeout: 60_000 });
+  await expect(win.locator(".xgplayer").first()).toBeVisible({ timeout: 60_000 });
   await win.waitForTimeout(8000);
   // 瞬时过期走应用自带“重取链接”恢复；仍过期则如实失败（取链路问题）
   expect(await ensurePreviewClean(win)).toBe(false);
