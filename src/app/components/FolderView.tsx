@@ -1,6 +1,6 @@
 /** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，命中本地磁盘缓存秒显，禁止逐项调 preview）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App as AntdApp, Badge, Breadcrumb, Button, Space, Spin, Typography } from "antd";
+import { App as AntdApp, Breadcrumb, Button, Space, Spin, Typography } from "antd";
 import { CheckCircleFilled, FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
 import { getStatusBatch, listShare, onDownloadDone, onDownloadProgress, warmThumbnails } from "../api";
 import type { FileStatus, ShareItem } from "../api";
@@ -369,20 +369,6 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     [items],
   );
 
-  /** 状态角标：下载中（底部文字）；已保存改走封面左上角绿色圆勾，不占底部行。 */
-  function statusBadge(item: ShareItem): React.JSX.Element | null {
-    const st = statusMap[item.file_id];
-    const prog = currentTab.progress?.[item.file_id];
-    if (prog !== undefined) {
-      const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
-      return <Badge status="processing" text={`下载中 ${pct}%`} />;
-    }
-    if (st === undefined || st.state === "none" || st.state === "saved") {
-      return null;
-    }
-    return <Badge status="processing" text="下载中" />;
-  }
-
   /** 单个缩略图磁贴（图片/视频均用服务端 thumbnail 快照，无则回退图标）。 */
   function renderTile(item: ShareItem): React.JSX.Element {
     const isFolder = item.type === "folder";
@@ -476,10 +462,6 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         >
           {item.name}
         </Typography.Paragraph>
-        <div style={{ fontSize: 11, color: "#999", minHeight: 16 }}>
-          {isFolder ? "文件夹" : ""}
-        </div>
-        <div style={{ minHeight: 18 }}>{statusBadge(item)}</div>
       </div>
     );
   }
