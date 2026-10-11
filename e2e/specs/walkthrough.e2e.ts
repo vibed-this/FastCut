@@ -53,6 +53,9 @@ const ctx: {
 type Bridge = {
   invoke: (channel: string, args?: unknown) => Promise<never>;
   onDownloadDone: (handler: (payload: { file_id: string; ok: boolean; path?: string }) => void) => () => void;
+  onDownloadProgress: (
+    handler: (payload: { file_id: string; done: number; total: number }) => void,
+  ) => () => void;
 };
 
 function bridgeInvoke<T>(page: Page, channel: string, args?: unknown): Promise<T> {
@@ -423,6 +426,48 @@ test("d. 设目标目录并保存：download-done ok 且 mp4 可播放", async (
   ).trim();
   expect(Number(probe)).toBeGreaterThan(0);
   await win.screenshot({ path: join(SHOTS, "04-saved.png") });
+});
+
+test("d2. 播即存：完整模式按播放自动触发下载（不等完成）", async () => {
+  // d 用例停在小文件播放器里：先关掉，切大文件验证“一点播放就存”，全程不点保存按钮。
+  await win.keyboard.press("Escape");
+  await expect(win.locator('[data-testid="video-player-modal"]')).toBeHidden({ timeout: 30_000 });
+  await uiPreviewFile(win, ctx.fileName);
+  await expect(win.locator('[data-testid="preview-video"]')).toBeVisible({ timeout: 120_000 });
+  await expect(win.locator(".xgplayer").first()).toBeVisible({ timeout: 60_000 });
+  await win.evaluate(() => {
+    (window as unknown as { __prog?: unknown }).__prog = null;
+    (window as unknown as { fastcut: Bridge }).fastcut.onDownloadProgress((p) => {
+      (window as unknown as { __prog?: unknown }).__prog = p;
+    });
+  });
+  // 空格=播放（open 模式 toggle），播即存只认第一次 play
+  await win.keyboard.press("Space");
+  await win.waitForFunction(
+    () => {
+      const v = document.querySelector('[data-testid="preview-video"] video') as HTMLVideoElement | null;
+      return v !== null && !v.paused;
+    },
+    undefined,
+    { timeout: 60_000, polling: 1000 },
+  );
+  // “已开始下载”提示出现（antd v6 notice 选择器），且主进程开始吐进度
+  await expect(win.locator(".ant-message-notice", { hasText: "已开始下载" }).first()).toBeVisible({
+    timeout: 120_000,
+  });
+  await win.waitForFunction(
+    () => (window as unknown as { __prog?: unknown }).__prog !== null,
+    undefined,
+    { timeout: 120_000, polling: 2000 },
+  );
+  const prog = (await win.evaluate(
+    () => (window as unknown as { __prog?: { file_id: string; done: number; total: number } }).__prog,
+  )) as { file_id: string; done: number; total: number };
+  expect(prog.file_id).toBe(ctx.fileId);
+  expect(prog.total).toBeGreaterThan(0);
+  // 关窗让后台下完与否都不阻塞后续用例（fire-and-forget）
+  await win.keyboard.press("Escape");
+  await win.screenshot({ path: join(SHOTS, "04b-auto-save.png") });
 });
 
 test("e. 去重记账：同一文件状态为 saved", async () => {

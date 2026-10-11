@@ -29,41 +29,27 @@ export interface VideoPaneProps {
 export const playerControl: { toggle: (() => void) | null } = { toggle: null };
 
 /**
- * 本地选档（与后端 pick_template 同语义）：显式档精确命中，miss 回退最大宽度档。
+ * 已自动保存的 fileKey（跨 open/preview 实例共享：预览触发过则完整模式不再重复触发，
+ * 反之亦然；手动点保存不受此限制）。
+ */
+const autoSaveFiredKeys = new Set<string>();
+
+/**
+ * 本地选档：总是取宽度最大的可用档（finished 且有 preview_url），无画质选择。
  *
  * @param templates - 预览档列表
- * @param preference - 偏好档
  * @returns 选中的档，无可用时 undefined
  */
-function pickUsableTemplate(templates: VideoPreview[], preference: string): VideoPreview | undefined {
+function pickUsableTemplate(templates: VideoPreview[]): VideoPreview | undefined {
   const usable = templates.filter(
     (t) => t.status === "finished" && typeof t.preview_url === "string" && t.preview_url.length > 0,
   );
   if (usable.length === 0) {
     return undefined;
   }
-  const want = preference.trim().toUpperCase();
-  if (want !== "" && want !== "AUTO") {
-    const hit = usable.find((t) => t.template_id.toUpperCase() === want);
-    if (hit !== undefined) {
-      return hit;
-    }
-  }
   return usable.reduce<VideoPreview | undefined>(
     (best, cur) => (best === undefined || (cur.template_width ?? 0) >= (best.template_width ?? 0) ? cur : best),
     undefined,
-  );
-}
-
-/**
- * 可用档（status finished 且有 preview_url）：驱动 xgplayer 清晰度列表。
- *
- * @param templates - 预览档列表
- * @returns 可播放的档
- */
-function usableTemplates(templates: VideoPreview[]): VideoPreview[] {
-  return templates.filter(
-    (t) => t.status === "finished" && typeof t.preview_url === "string" && t.preview_url.length > 0,
   );
 }
 
@@ -80,8 +66,9 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const tab = state.tabs.find((t) => t.id === tabId);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<Player | null>(null);
-  const [templates, setTemplates] = useState<VideoPreview[]>([]);
   const [playUrl, setPlayUrl] = useState("");
+  /** 当前播放档的 template_id（最高档，下载时透传记账）。 */
+  const [playTemplate, setPlayTemplate] = useState("");
   const [loading, setLoading] = useState(false);
   /** 视频宽高比（w/h）：loadedmetadata 后回填，Modal 按比例定窗消黑边。 */
   const [videoRatio, setVideoRatio] = useState<number | null>(null);
@@ -92,7 +79,6 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   const file = mode === "open" ? tab?.opened_file : tab?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
-  const definition = state.definition;
 
   // 下载进度事件订阅（仅完整模式：下载入口只在那里，避免双实例重复 toast）。
   useEffect(() => {
@@ -152,6 +138,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢容器。 */
   const fetchSeqRef = useRef(0);
+  /** handleSave 最新闭包（player effect 定义在前，事件触发时经此调用，避免过期 state）。 */
+  const handleSaveRef = useRef<() => Promise<void>>(async () => undefined);
 
   /** 拉取可用档与播放地址（单次 preview，本地选档，避免重复打接口）。 */
   async function fetchPreview(): Promise<void> {
@@ -160,9 +148,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     }
     const seq = fetchSeqRef.current + 1;
     fetchSeqRef.current = seq;
-    // 新文件/偏好重取链：丢弃上一轮播放器内切换的档位记忆与窗口比例。
-    switchUrlRef.current = null;
-    switchTemplateRef.current = null;
+    // 新文件重取链：丢弃上一轮窗口比例。
     setVideoRatio(null);
     setLoading(true);
     setExpired(false);
@@ -172,12 +158,12 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       if (fetchSeqRef.current !== seq) {
         return;
       }
-      setTemplates(list);
-      const picked = pickUsableTemplate(list, definition);
+      const picked = pickUsableTemplate(list);
       if (picked === undefined || !picked.preview_url) {
-        throw new Error(`没有可用的预览档（偏好 ${definition}）`);
+        throw new Error("没有可用的预览档");
       }
       setPlayUrl(picked.preview_url);
+      setPlayTemplate(picked.template_id);
       dispatch({
         type: "tabs/video",
         tabId,
@@ -205,47 +191,22 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   useEffect(() => {
     void fetchPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileKey, definition]);
+  }, [fileKey]);
 
-  // xgplayer 接入：playUrl 就绪且不在 loading 期时创建实例（loading 结束容器才稳定挂载），
-  // playUrl / templates / definition 变化时销毁重建，组件卸载时销毁。
-  // 清晰度列表由全部可用档驱动，默认档复用 pickUsableTemplate（AUTO 即最高档）；
-  // 播放器内切换清晰度经 definition_change 回写 playUrl（跳过重建，保存用当前档）。
+  // xgplayer 接入：playUrl 就绪且不在 loading 期时创建实例（loading 结束容器才稳定挂载）。
+  // 无清晰度插件：永远播最高档，不提供切换。
   // 空格由 App 层全局接管：此处以 ignores 关掉 xgplayer keyboard 插件，避免双重响应；
   // 完整模式注册 playerControl.toggle 供空格开关，预览模式不注册（空格只关闭）。
-  const switchUrlRef = useRef<string | null>(null);
-  const switchTemplateRef = useRef<string | null>(null);
-  /** playUrl 最新值（definition_change 回调闭包内读取，避免过期 state）。 */
-  const playUrlRef = useRef("");
-  useEffect(() => {
-    playUrlRef.current = playUrl;
-  }, [playUrl]);
   useEffect(() => {
     const container = containerRef.current;
     if (container === null || loading || playUrl === "") {
       return;
     }
-    if (switchUrlRef.current === playUrl) {
-      // 播放器内切换档位引起的状态同步，实例已在播该地址，无需重建。
-      switchUrlRef.current = null;
-      return;
-    }
-    const usable = usableTemplates(templates);
-    const picked = pickUsableTemplate(templates, definition) ?? usable[0];
-    if (picked === undefined || picked.preview_url === undefined) {
-      return;
-    }
-    const activeTemplate = switchTemplateRef.current ?? picked.template_id;
-    switchTemplateRef.current = null;
     const player = new Player({
       el: container,
       url: playUrl,
       plugins: [HlsPlugin],
       ignores: ["keyboard"],
-      definition: {
-        list: usable.map((t) => ({ url: t.preview_url as string, definition: t.template_id })),
-        defaultDefinition: activeTemplate,
-      },
       playbackRate: [0.5, 1, 1.5, 2],
       width: "100%",
       height: "100%",
@@ -262,6 +223,15 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         }
       };
     }
+    // 播即存（open 与 preview 均触发：第一次 play 自动走一次保存，等价于自动点下载按钮）；
+    // handleSave 内部已有已存短路 + 主进程重入 guard，跨实例重复由 autoSaveFiredKeys 拦。
+    player.on("play", () => {
+      if (autoSaveFiredKeys.has(fileKey)) {
+        return;
+      }
+      autoSaveFiredKeys.add(fileKey);
+      void handleSaveRef.current();
+    });
     // 首帧元数据就绪即回填宽高比，Modal 按比例定窗（竖视频竖窗，无黑边）。
     const innerVideo = container.querySelector("video");
     const readRatio = (): void => {
@@ -291,22 +261,6 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         void v.play().catch(() => undefined);
       }
     });
-    player.on("definition_change", (to: unknown) => {
-      const item = to as { url?: unknown; definition?: unknown } | null | undefined;
-      if (typeof item?.url !== "string" || item.url === "" || item.url === playUrlRef.current) {
-        return;
-      }
-      switchUrlRef.current = item.url;
-      switchTemplateRef.current =
-        typeof item.definition === "string" && item.definition !== "" ? item.definition : null;
-      playUrlRef.current = item.url;
-      setPlayUrl(item.url);
-      dispatch({
-        type: "tabs/video",
-        tabId,
-        video: { url: item.url, template: switchTemplateRef.current ?? "" },
-      });
-    });
     return () => {
       container.querySelector("video")?.removeEventListener("loadedmetadata", readRatio);
       if (mode === "open" && playerControl.toggle !== null) {
@@ -315,7 +269,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       playerRef.current = null;
       player.destroy();
     };
-  }, [playUrl, templates, loading, definition, mode]);
+  }, [playUrl, loading, mode, fileKey]);
 
   if (tab === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
@@ -347,7 +301,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         .map((s) => s.name)
         .filter((n) => n !== "");
       const subDir = dirs.join("/");
-      await downloadVideo(playUrl, curTab.share_id, curFile.file_id, curFile.name, definition, subDir);
+      await downloadVideo(playUrl, curTab.share_id, curFile.file_id, curFile.name, playTemplate, subDir);
       void message.success("已开始下载");
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
@@ -355,6 +309,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       setSaving(false);
     }
   }
+  handleSaveRef.current = handleSave;
 
   const noMaterial = state.materialDir === "";
 
@@ -363,7 +318,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     dispatch({ type: mode === "open" ? "tabs/openFile" : "tabs/preview", tabId, file: undefined });
     dispatch({ type: "tabs/video", tabId, video: undefined });
     setPlayUrl("");
-    setTemplates([]);
+    setPlayTemplate("");
     setVideoRatio(null);
     setExpired(false);
     setExpiredMsg("");
