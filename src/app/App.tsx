@@ -5,6 +5,8 @@ import { getConfig, listShares } from "./api";
 import { useStore } from "./store";
 import Sidebar from "./components/Sidebar";
 import TabsView from "./components/TabsView";
+import { isVideoFile } from "./components/FolderView";
+import { playerControl } from "./components/VideoPane";
 
 /**
  * 应用根组件（需在上层的 StoreProvider 与 antd App/ConfigProvider 内渲染）。
@@ -39,6 +41,49 @@ export default function App(): React.JSX.Element {
   }, []);
 
   const emptyMaterial = state.materialDir === "";
+  const activeTab = state.tabs.find((t) => t.id === state.activeTabId) ?? null;
+
+  // 全局空格（Quick Look 语义）：预览开着→关闭；完整播放器开着→播放/暂停；
+  // 否则选中视频→空格预览。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
+  const activeTabId = activeTab?.id ?? null;
+  const previewFileId = activeTab?.preview_file?.file_id ?? null;
+  const openedFileId = activeTab?.opened_file?.file_id ?? null;
+  const selectedFile = activeTab?.selected_file;
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.code !== "Space" || e.repeat) {
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (target !== null && target.closest("input,textarea,select,[contenteditable='true'],button")) {
+        return;
+      }
+      if (activeTabId === null) {
+        return;
+      }
+      if (previewFileId !== null) {
+        e.preventDefault();
+        dispatch({ type: "tabs/preview", tabId: activeTabId, file: undefined });
+        return;
+      }
+      if (openedFileId !== null) {
+        if (playerControl.toggle !== null) {
+          e.preventDefault();
+          playerControl.toggle();
+        }
+        return;
+      }
+      if (selectedFile !== undefined && isVideoFile(selectedFile)) {
+        e.preventDefault();
+        dispatch({ type: "tabs/preview", tabId: activeTabId, file: selectedFile });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, activeTabId, previewFileId, openedFileId, selectedFile]);
 
   return (
     <Layout style={{ height: "100vh" }}>

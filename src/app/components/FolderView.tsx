@@ -16,8 +16,8 @@ export interface FolderViewProps {
 /** 单页条数：与后端上限 100 对齐。 */
 const PAGE_SIZE = 100;
 
-/** 是否为视频文件。 */
-function isVideoFile(item: ShareItem): boolean {
+/** 是否为视频文件（App 层空格预览共用）。 */
+export function isVideoFile(item: ShareItem): boolean {
   if (item.type === "folder") {
     return false;
   }
@@ -26,24 +26,6 @@ function isVideoFile(item: ShareItem): boolean {
   }
   const ext = (item.file_extension ?? "").toLowerCase();
   return ["mp4", "mkv", "mov", "m3u8", "avi", "webm"].includes(ext);
-}
-
-/** 格式化文件大小。 */
-function formatSize(size?: number): string {
-  if (size === undefined || size === null) {
-    return "-";
-  }
-  if (size < 1024) {
-    return `${size} B`;
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = size;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
 }
 
 /**
@@ -301,9 +283,15 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     dispatch({ type: "tabs/push", tabId, entry: { file_id: item.file_id, name: item.name } });
   }
 
-  /** 选中视频文件并触发右侧预览。 */
-  function previewFile(item: ShareItem): void {
+  /** 选中视频文件（仅高亮，不打开）。 */
+  function selectFile(item: ShareItem): void {
     dispatch({ type: "tabs/select", tabId, file: item });
+  }
+
+  /** 双击打开完整播放器（选中 + 半透明遮罩 + 标题栏 + 下载）。 */
+  function openFile(item: ShareItem): void {
+    dispatch({ type: "tabs/select", tabId, file: item });
+    dispatch({ type: "tabs/openFile", tabId, file: item });
   }
 
   /** 文件夹排前面，其余保持接口返回顺序（资源管理器式）。 */
@@ -356,12 +344,14 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           if (isFolder) {
             enterFolder(item);
           } else if (isVideoFile(item)) {
-            previewFile(item);
+            selectFile(item);
           }
         }}
         onDoubleClick={() => {
           if (isFolder) {
             enterFolder(item);
+          } else if (isVideoFile(item)) {
+            openFile(item);
           }
         }}
         style={{
@@ -403,7 +393,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           {item.name}
         </Typography.Paragraph>
         <div style={{ fontSize: 11, color: "#999", minHeight: 16 }}>
-          {isFolder ? "文件夹" : formatSize(item.size)}
+          {isFolder ? "文件夹" : ""}
         </div>
         <div style={{ minHeight: 18 }}>{statusBadge(item)}</div>
       </div>
@@ -480,7 +470,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           </div>
         </Space>
       </div>
-      {tab.selected_file !== undefined ? <VideoPane tabId={tabId} /> : null}
+      {tab.opened_file !== undefined ? <VideoPane tabId={tabId} mode="open" /> : null}
+      {tab.preview_file !== undefined ? <VideoPane tabId={tabId} mode="preview" /> : null}
     </div>
   );
 }

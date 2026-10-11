@@ -1,4 +1,4 @@
-/** 全屏视频播放器 Modal：经典播放器布局（标题栏 + 视频区 + 控制条）。 */
+/** 视频播放器悬浮窗（类 macOS 空格预览）：标题栏 + 视频区，可选无框预览。 */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Typography } from "antd";
 import { CloseOutlined, FullscreenOutlined } from "@ant-design/icons";
@@ -13,26 +13,28 @@ export interface VideoPlayerModalProps {
   actions?: ReactNode;
   /** 视频宽高比（w/h）：窗口按比例自适应，消除黑边；null 时用默认尺寸。 */
   videoRatio?: number | null;
+  /** 是否显示标题栏（标题 + 操作区 + 全屏/关闭按钮）；空格预览模式为 false。 */
+  chrome?: boolean;
+  /** 是否显示半透明遮罩（双击打开的完整播放器为 true，空格预览为 false）。 */
+  dimmed?: boolean;
   /** 关闭回调：ESC、遮罩点击、关闭按钮统一走这里。 */
   onClose: () => void;
   /** 中部视频区：调用方传入已接好播放源的 <video> 元素。 */
   children: ReactNode;
-  /** 底部控制条：调用方传入操作区（保存/重试/清晰度等）。 */
-  footer?: ReactNode;
 }
 
 /**
- * 全屏 Modal 播放器。
+ * 视频播放器悬浮窗。
  *
- * 经典播放器布局：顶部标题栏 + 关闭按钮，中部视频区，底部控制条。
- * 播放/暂停、进度条、音量由中部 <video> 的原生 controls 提供，
- * 全屏按钮调用 Fullscreen API 将播放器容器全屏。
+ * 完整模式：标题栏（标题 + 操作区 + 全屏/关闭）+ 视频区；
+ * 空格预览模式（chrome=false）：纯视频区，无标题栏无下载。
+ * dimmed 控制是否显示半透明遮罩（完整模式 true，预览 false）。
  *
  * @param props - 组件属性
  * @returns 播放器元素，关闭时返回 null
  */
 export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JSX.Element | null {
-  const { open, title, actions, videoRatio, onClose, children, footer } = props;
+  const { open, title, actions, videoRatio, chrome = true, dimmed = false, onClose, children } = props;
   const boxRef = useRef<HTMLDivElement | null>(null);
   // 窗口尺寸：按视频比例自适应（消除黑边），约束在视口内；无比例时默认尺寸。
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
@@ -41,7 +43,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
       return;
     }
     const fit = (): void => {
-      const titleH = 45;
+      const titleH = chrome ? 45 : 0;
       const maxW = Math.min(1000, window.innerWidth * 0.92);
       const maxH = window.innerHeight * 0.86 - titleH;
       if (videoRatio === null || videoRatio === undefined || videoRatio <= 0) {
@@ -61,7 +63,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
     return () => {
       window.removeEventListener("resize", fit);
     };
-  }, [open, videoRatio]);
+  }, [open, videoRatio, chrome]);
 
   /** 全屏按钮：将播放器容器全屏，已全屏则退出。 */
   const toggleFullscreen = useCallback(() => {
@@ -98,6 +100,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
     return null;
   }
 
+  // 无 footer：下载收进标题栏 actions，底部不再留条。
   return (
     <div
       data-testid="video-player-modal"
@@ -105,7 +108,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
       aria-modal="true"
       aria-label={title}
       onMouseDown={(e) => {
-        // 遮罩透明不可见但仍拦截点击：点中空白处关闭，内容区点击不关闭。
+        // 点中空白处关闭，内容区点击不关闭。
         if (e.target === e.currentTarget) {
           onClose();
         }
@@ -114,7 +117,7 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         position: "fixed",
         inset: 0,
         zIndex: 2000,
-        background: "transparent",
+        background: dimmed ? "rgba(0, 0, 0, 0.55)" : "transparent",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -135,42 +138,44 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
           boxShadow: "0 18px 70px rgba(0, 0, 0, 0.65)",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "10px 12px",
-            background: "#141414",
-            borderBottom: "1px solid #2a2a2a",
-          }}
-        >
-          <Typography.Text
-            ellipsis={{ tooltip: title }}
-            style={{ flex: 1, minWidth: 0, color: "#fff", fontSize: 14 }}
+        {chrome ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "10px 12px",
+              background: "#141414",
+              borderBottom: "1px solid #2a2a2a",
+            }}
           >
-            {title}
-          </Typography.Text>
-          {actions}
-          <Button
-            data-testid="video-player-fullscreen"
-            type="text"
-            size="small"
-            title="全屏"
-            aria-label="全屏"
-            icon={<FullscreenOutlined style={{ color: "#fff" }} />}
-            onClick={toggleFullscreen}
-          />
-          <Button
-            data-testid="video-player-close"
-            type="text"
-            size="small"
-            title="关闭（ESC）"
-            aria-label="关闭预览"
-            icon={<CloseOutlined style={{ color: "#fff" }} />}
-            onClick={onClose}
-          />
-        </div>
+            <Typography.Text
+              ellipsis={{ tooltip: title }}
+              style={{ flex: 1, minWidth: 0, color: "#fff", fontSize: 14 }}
+            >
+              {title}
+            </Typography.Text>
+            {actions}
+            <Button
+              data-testid="video-player-fullscreen"
+              type="text"
+              size="small"
+              title="全屏"
+              aria-label="全屏"
+              icon={<FullscreenOutlined style={{ color: "#fff" }} />}
+              onClick={toggleFullscreen}
+            />
+            <Button
+              data-testid="video-player-close"
+              type="text"
+              size="small"
+              title="关闭（ESC）"
+              aria-label="关闭预览"
+              icon={<CloseOutlined style={{ color: "#fff" }} />}
+              onClick={onClose}
+            />
+          </div>
+        ) : null}
         <div
           data-testid="video-player-body"
           style={{
@@ -184,18 +189,6 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         >
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{children}</div>
         </div>
-        {footer !== undefined ? (
-          <div
-            data-testid="video-player-footer"
-            style={{
-              padding: "10px 12px",
-              background: "#141414",
-              borderTop: "1px solid #2a2a2a",
-            }}
-          >
-            {footer}
-          </div>
-        ) : null}
       </div>
     </div>
   );

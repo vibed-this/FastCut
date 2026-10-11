@@ -30,6 +30,10 @@ export interface Tab {
   share_name: string;
   stack: StackEntry[];
   selected_file?: ShareItem;
+  /** 空格预览中的文件（Quick Look 弹窗，无标题栏/下载按钮）。 */
+  preview_file?: ShareItem;
+  /** 双击打开的文件（完整播放器：半透明遮罩 + 标题栏 + 下载）。 */
+  opened_file?: ShareItem;
   video?: TabVideo;
   progress?: Record<string, TabProgress>;
 }
@@ -76,6 +80,8 @@ export type Action =
   | { type: "tabs/pop"; tabId: string }
   | { type: "tabs/select"; tabId: string; file?: ShareItem }
   | { type: "tabs/selectFile"; tabId: string; file?: ShareItem }
+  | { type: "tabs/preview"; tabId: string; file?: ShareItem }
+  | { type: "tabs/openFile"; tabId: string; file?: ShareItem }
   | { type: "tabs/video"; tabId: string; video?: TabVideo }
   | {
       type: "tabs/progress";
@@ -221,6 +227,18 @@ export function reducer(state: AppState, action: Action): AppState {
       return mapTab(state, action.tabId, (t) => ({
         ...t,
         selected_file: action.file,
+      }));
+    case "tabs/preview":
+      return mapTab(state, action.tabId, (t) => ({
+        ...t,
+        preview_file: action.file,
+      }));
+    case "tabs/openFile":
+      return mapTab(state, action.tabId, (t) => ({
+        ...t,
+        // 双击打开完整播放器时关掉空格预览，两者不叠加。
+        preview_file: undefined,
+        opened_file: action.file,
       }));
     case "tabs/video":
       return mapTab(state, action.tabId, (t) => ({

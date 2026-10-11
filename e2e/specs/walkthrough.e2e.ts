@@ -195,7 +195,7 @@ async function uiLoadAll(page: Page): Promise<void> {
   }
 }
 
-/** 点击包含指定文件名的预览磁贴。 */
+/** 双击打开指定文件名的视频（单击仅选中，完整播放器需双击）。 */
 async function uiPreviewFile(page: Page, fileName: string): Promise<void> {
   const tiles = page.locator('[data-testid="preview-file"]');
   await expect(tiles.first()).toBeVisible({ timeout: 90_000 });
@@ -204,6 +204,7 @@ async function uiPreviewFile(page: Page, fileName: string): Promise<void> {
     const text = (await tiles.nth(i).innerText().catch(() => "")) ?? "";
     if (text.includes(fileName)) {
       await tiles.nth(i).click();
+      await tiles.nth(i).dblclick();
       return;
     }
   }
@@ -212,10 +213,12 @@ async function uiPreviewFile(page: Page, fileName: string): Promise<void> {
     const text = (await tiles.nth(i).innerText().catch(() => "")) ?? "";
     if (text.toLowerCase().includes(".mp4")) {
       await tiles.nth(i).click();
+      await tiles.nth(i).dblclick();
       return;
     }
   }
   await tiles.first().click();
+  await tiles.first().dblclick();
 }
 
 /** 若文件/文件夹磁贴都不存在（如瞬时限流导致列表为空），reload 后重进目录自愈。 */

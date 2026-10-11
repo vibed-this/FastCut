@@ -1,4 +1,4 @@
-/** 视频预览与保存面板：全屏 Modal + xgplayer 播放器。 */
+/** 视频预览与保存面板：空格预览弹窗 / 双击完整播放器 + xgplayer。 */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App as AntdApp, Button, Spin, Typography } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
@@ -10,11 +10,23 @@ import type { VideoPreview } from "../api";
 import { useStore } from "../store";
 import VideoPlayerModal from "./VideoPlayerModal";
 
+/** 播放器模式：open=双击完整播放器，preview=空格 Quick Look 预览。 */
+export type VideoPaneMode = "open" | "preview";
+
 /** 视频面板属性。 */
 export interface VideoPaneProps {
   /** 所属页签 id。 */
   tabId: string;
+  /** 播放器模式。 */
+  mode: VideoPaneMode;
 }
+
+/**
+ * 完整播放器的空格开关句柄（preview 模式不注册，空格只负责关闭）。
+ * App 层全局空格处理经由此处触发播放/暂停，避免与 xgplayer 按键插件双重响应
+ *（xgplayer 以 ignores 关闭 keyboard 插件）。
+ */
+export const playerControl: { toggle: (() => void) | null } = { toggle: null };
 
 /**
  * 本地选档（与后端 pick_template 同语义）：显式档精确命中，miss 回退最大宽度档。
@@ -56,13 +68,13 @@ function usableTemplates(templates: VideoPreview[]): VideoPreview[] {
 }
 
 /**
- * 视频预览面板。
+ * 视频面板（双模式）。
  *
  * @param props - 组件属性
  * @returns 预览元素
  */
 export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
-  const { tabId } = props;
+  const { tabId, mode } = props;
   const { state, dispatch } = useStore();
   const { message } = AntdApp.useApp();
   const tab = state.tabs.find((t) => t.id === tabId);
@@ -78,12 +90,15 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const file = tab?.selected_file;
+  const file = mode === "open" ? tab?.opened_file : tab?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
   const definition = state.definition;
 
-  // 下载进度事件订阅
+  // 下载进度事件订阅（仅完整模式：下载入口只在那里，避免双实例重复 toast）。
   useEffect(() => {
+    if (mode !== "open") {
+      return;
+    }
     let offProgress: (() => void) | null = null;
     let offDone: (() => void) | null = null;
     let cancelled = false;
@@ -121,7 +136,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       offDone?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId]);
+  }, [tabId, mode]);
 
   // done 后刷新该 tab 状态：progress 清空即重查选中文件状态
   useEffect(() => {
@@ -196,6 +211,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   // playUrl / templates / definition 变化时销毁重建，组件卸载时销毁。
   // 清晰度列表由全部可用档驱动，默认档复用 pickUsableTemplate（AUTO 即最高档）；
   // 播放器内切换清晰度经 definition_change 回写 playUrl（跳过重建，保存用当前档）。
+  // 空格由 App 层全局接管：此处以 ignores 关掉 xgplayer keyboard 插件，避免双重响应；
+  // 完整模式注册 playerControl.toggle 供空格开关，预览模式不注册（空格只关闭）。
   const switchUrlRef = useRef<string | null>(null);
   const switchTemplateRef = useRef<string | null>(null);
   /** playUrl 最新值（definition_change 回调闭包内读取，避免过期 state）。 */
@@ -224,6 +241,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       el: container,
       url: playUrl,
       plugins: [HlsPlugin],
+      ignores: ["keyboard"],
       definition: {
         list: usable.map((t) => ({ url: t.preview_url as string, definition: t.template_id })),
         defaultDefinition: activeTemplate,
@@ -231,10 +249,19 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       playbackRate: [0.5, 1, 1.5, 2],
       width: "100%",
       height: "100%",
-      autoplay: false,
+      autoplay: mode === "preview",
       videoAttributes: { preload: "metadata", crossorigin: "anonymous" },
     });
     playerRef.current = player;
+    if (mode === "open") {
+      playerControl.toggle = (): void => {
+        if (player.paused) {
+          void player.play();
+        } else {
+          player.mediaPause();
+        }
+      };
+    }
     // 首帧元数据就绪即回填宽高比，Modal 按比例定窗（竖视频竖窗，无黑边）。
     const innerVideo = container.querySelector("video");
     const readRatio = (): void => {
@@ -252,6 +279,17 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       setExpired(true);
       const detail = err instanceof Error ? err.message : String(err ?? "");
       setExpiredMsg(detail === "" ? "播放失败，点“重取链接”重试" : `播放失败（${detail}），点“重取链接”重试`);
+    });
+    // 预览自动播放被浏览器拦截时退化为静音播（带声优先，实在不行先动起来）。
+    player.on("autoplay_was_prevented", () => {
+      if (mode !== "preview") {
+        return;
+      }
+      const v = container.querySelector("video");
+      if (v !== null) {
+        v.muted = true;
+        void v.play().catch(() => undefined);
+      }
     });
     player.on("definition_change", (to: unknown) => {
       const item = to as { url?: unknown; definition?: unknown } | null | undefined;
@@ -271,10 +309,13 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     });
     return () => {
       container.querySelector("video")?.removeEventListener("loadedmetadata", readRatio);
+      if (mode === "open" && playerControl.toggle !== null) {
+        playerControl.toggle = null;
+      }
       playerRef.current = null;
       player.destroy();
     };
-  }, [playUrl, templates, loading, definition]);
+  }, [playUrl, templates, loading, definition, mode]);
 
   if (tab === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
@@ -317,40 +358,49 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   const noMaterial = state.materialDir === "";
 
-  /** 关闭全屏预览：Modal 的 ESC / 遮罩 / 关闭按钮统一走这里。 */
-  const closePreview = useCallback((): void => {
-    dispatch({ type: "tabs/select", tabId, file: undefined });
+  /** 关闭 viewer：open 清 opened_file，preview 清 preview_file；选中保留。 */
+  const closeViewer = useCallback((): void => {
+    dispatch({ type: mode === "open" ? "tabs/openFile" : "tabs/preview", tabId, file: undefined });
     dispatch({ type: "tabs/video", tabId, video: undefined });
     setPlayUrl("");
     setTemplates([]);
-  }, [dispatch, tabId]);
+    setVideoRatio(null);
+    setExpired(false);
+    setExpiredMsg("");
+  }, [dispatch, tabId, mode]);
+
+  const isOpen = mode === "open";
 
   return (
     <VideoPlayerModal
       open
       title={file.name}
-      onClose={closePreview}
+      onClose={closeViewer}
       videoRatio={videoRatio}
+      chrome={isOpen}
+      dimmed={isOpen}
       actions={
-        <Button
-          data-testid="save-video"
-          type="primary"
-          size="small"
-          icon={<DownloadOutlined />}
-          loading={saving}
-          disabled={saved || noMaterial}
-          title={noMaterial ? "请先在左侧边栏配置素材文件夹" : saved ? "已保存" : "保存当前视频"}
-          onClick={() => {
-            void handleSave();
-          }}
-          style={
-            saved || noMaterial
-              ? { background: "#2a2a2a", borderColor: "#434343", color: "rgba(255, 255, 255, 0.5)" }
-              : undefined
-          }
-        >
-          {saved ? "已保存" : "保存"}
-        </Button>
+        isOpen ? (
+          <Button
+            data-testid="save-video"
+            type="primary"
+            size="small"
+            icon={<DownloadOutlined />}
+            loading={saving}
+            disabled={saved || noMaterial}
+            title={noMaterial ? "请先在左侧边栏配置素材文件夹" : saved ? "已保存" : "保存当前视频"}
+            onClick={() => {
+              void handleSave();
+            }}
+            style={
+              saved || noMaterial
+                ? { background: "#2a2a2a", borderColor: "#434343", color: "rgba(255, 255, 255, 0.5)" }
+                : undefined
+            }
+          >
+            {saved ? "已保存" : "保存"}
+          </Button>
+        ) : undefined
       }
     >
       <div style={{ flex: 1, minHeight: 0, position: "relative", background: "#000" }}>
