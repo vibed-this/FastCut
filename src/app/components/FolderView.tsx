@@ -54,6 +54,24 @@ export interface FolderViewProps {
 /** 单页条数：与后端上限 100 对齐。 */
 const PAGE_SIZE = 100;
 
+/**
+ * 网盘根目录是否应自动进入：仅当根目录唯一一条且为文件夹（无翻页剩余）。
+ *
+ * @param items - 根目录首屏条目
+ * @param hasMore - 是否还有下一页（true 即根目录不止这些，不自动进入）
+ * @returns 唯一文件夹条目（可进入），否则 undefined
+ */
+export function singleRootFolder(
+  items: ShareItem[],
+  hasMore: boolean,
+): ShareItem | undefined {
+  if (hasMore || items.length !== 1) {
+    return undefined;
+  }
+  const only = items[0];
+  return only !== undefined && only.type === "folder" ? only : undefined;
+}
+
 /** 是否为视频文件（App 层空格预览共用）。 */
 export function isVideoFile(item: ShareItem): boolean {
   if (item.type === "folder") {
@@ -193,6 +211,12 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   /** hover 命中收敛到 store（App 层空格预览共用同一目标）。 */
   /** 磁贴直下取链中（preview 未返回、progress 事件未到前的空窗期即转圈、防连点）。 */
   const [tilePendingMap, setTilePendingMap] = useState<Record<string, boolean>>({});
+  /**
+   * 根单文件夹已自动进入的合集 id：仅一次（点击合集打开时）。
+   * 用户面包屑退回根目录不再重复进入；合集关闭（collectionKey 清空）后重置，
+   * 保证下次重新打开同一合集仍可自动进入。
+   */
+  const autoEnteredRootRef = useRef<string | null>(null);
 
   // ---- xiaohongshu 本地状态 ----
   const [xhsItems, setXhsItems] = useState<FsEntry[]>([]);
@@ -264,6 +288,13 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     return explorer.stack[explorer.stack.length - 1]?.file_id ?? "";
   }, [explorer]);
 
+  // 合集关闭后重置自动进入标记，下次重开同一合集仍可自动进入。
+  useEffect(() => {
+    if (collectionKey === "") {
+      autoEnteredRootRef.current = null;
+    }
+  }, [collectionKey]);
+
   /** xhs 本地目录加载（视频条目顺带后台抽帧缩略图，fire-and-forget）。 */
   const loadXhs = useCallback(async () => {
     if (explorer === undefined || explorer === null || explorer.kind !== "xiaohongshu") {
@@ -306,10 +337,27 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     if (current === undefined) {
       return;
     }
+    const isRoot = explorer.stack.length === 1;
+    const collectionId = explorer.collection_id;
     setLoading(true);
     try {
       // 首屏只取一页，大目录靠“加载更多”续取，避免一次拉全卡死。
       const res = await listShare(explorer.collection_id, current.file_id, undefined, PAGE_SIZE);
+      // 网盘合集根目录仅有一个文件夹时自动进入（仅打开合集那一次，退回根不重复触发）。
+      if (isRoot && autoEnteredRootRef.current !== collectionId) {
+        const onlyFolder = singleRootFolder(res.items, res.next_marker !== "");
+        if (onlyFolder !== undefined) {
+          autoEnteredRootRef.current = collectionId;
+          setItems([]);
+          setNextMarker(null);
+          setStatusMap({});
+          dispatch({
+            type: "explorer/push",
+            entry: { file_id: onlyFolder.file_id, name: onlyFolder.name },
+          });
+          return;
+        }
+      }
       setItems(res.items);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
       setStatusMap({});
