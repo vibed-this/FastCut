@@ -1,5 +1,5 @@
 /** 侧边栏：合集列表的展示与管理入口（搜索 + 按分类可折叠分组）。 */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   App as AntdApp,
   AutoComplete,
@@ -33,6 +33,7 @@ import {
 import type { Collection, CollectionKind } from "../api";
 import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore } from "../store";
+import { OPEN_KEYS_KEY, loadOpenKeys } from "../uiMemory";
 
 /** 新建合集弹窗内部的表单状态。 */
 interface AddFormState {
@@ -88,8 +89,24 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
   const addPristineRef = useRef(true);
   /** 顶部搜索框：按合集名称过滤（大小写不敏感）。 */
   const [query, setQuery] = useState("");
-  /** 展开中的分組 key：null 即全部展开（初始态）；搜索时强制全展。 */
-  const [openKeys, setOpenKeys] = useState<string[] | null>(null);
+  /** 展开中的分組 key：null 即全部展开（初始态）；搜索时强制全展；变更即记入 localStorage。 */
+  const [openKeys, setOpenKeys] = useState<string[] | null>(() =>
+    typeof localStorage === "undefined" ? null : loadOpenKeys(() => localStorage.getItem(OPEN_KEYS_KEY)),
+  );
+  useEffect(() => {
+    if (typeof localStorage === "undefined") {
+      return;
+    }
+    try {
+      if (openKeys === null) {
+        localStorage.removeItem(OPEN_KEYS_KEY);
+      } else {
+        localStorage.setItem(OPEN_KEYS_KEY, JSON.stringify(openKeys));
+      }
+    } catch {
+      // 存储不可用时忽略，下次回默认全展。
+    }
+  }, [openKeys]);
 
   /** 打开新建合集弹窗：重置表单后读剪贴板，命中分享链接自动填入。 */
   function handleOpenAdd(): void {

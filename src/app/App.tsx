@@ -1,5 +1,5 @@
 /** 应用入口：浅色布局与全局初始化。 */
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Alert, App as AntdApp, Empty, Layout } from "antd";
 import { getConfig, listCollections } from "./api";
 import { useStore } from "./store";
@@ -7,6 +7,13 @@ import Sidebar from "./components/Sidebar";
 import FolderView from "./components/FolderView";
 import { isVideoFile } from "./components/FolderView";
 import { playerControl } from "./components/VideoPane";
+import {
+  DEFAULT_SIDER_WIDTH,
+  SIDER_WIDTH_KEY,
+  clampSiderWidth,
+  loadSiderWidth,
+} from "./siderWidth";
+import { ACTIVE_COLLECTION_KEY, loadActiveCollectionId } from "./uiMemory";
 
 /**
  * 应用根组件（需在上层的 StoreProvider 与 antd App/ConfigProvider 内渲染）。
@@ -27,6 +34,14 @@ export default function App(): React.JSX.Element {
         }
         dispatch({ type: "collections/set", collections });
         dispatch({ type: "material/set", dir: cfg.target_dir ?? "" });
+        // 恢复上次打开的合集（仅当它还在列表里；回到根目录，不恢复深层浏览栈）。
+        if (typeof localStorage !== "undefined") {
+          const lastId = loadActiveCollectionId(() => localStorage.getItem(ACTIVE_COLLECTION_KEY));
+          const target = lastId === null ? undefined : collections.find((c) => c.collection_id === lastId);
+          if (target !== undefined) {
+            dispatch({ type: "explorer/open", collection: target });
+          }
+        }
       } catch (e) {
         if (!cancelled) {
           void message.error(e instanceof Error ? e.message : String(e));
@@ -41,6 +56,76 @@ export default function App(): React.JSX.Element {
 
   const emptyMaterial = state.materialDir === "";
   const explorer = state.explorer;
+
+  // 右侧打开的合集 id：变更即记入 localStorage；关闭或合集被删后清除。
+  const activeCollectionId = state.activeCollectionId;
+  useEffect(() => {
+    if (typeof localStorage === "undefined") {
+      return;
+    }
+    try {
+      if (activeCollectionId === null) {
+        localStorage.removeItem(ACTIVE_COLLECTION_KEY);
+      } else {
+        localStorage.setItem(ACTIVE_COLLECTION_KEY, activeCollectionId);
+      }
+    } catch {
+      // 存储不可用时忽略，下次回到空状态。
+    }
+  }, [activeCollectionId]);
+
+  // 左侧栏宽度：可拖拽调整，记忆到 localStorage。
+  const [siderWidth, setSiderWidth] = useState<number>(() =>
+    typeof localStorage === "undefined"
+      ? DEFAULT_SIDER_WIDTH
+      : loadSiderWidth(() => localStorage.getItem(SIDER_WIDTH_KEY)),
+  );
+  const [resizing, setResizing] = useState(false);
+  const widthRef = useRef(siderWidth);
+  widthRef.current = siderWidth;
+
+  function persistSiderWidth(width: number): void {
+    try {
+      localStorage.setItem(SIDER_WIDTH_KEY, String(width));
+    } catch {
+      // 存储不可用（如隐私模式）时忽略，下次回默认值。
+    }
+  }
+
+  function beginResize(e: ReactMouseEvent): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = widthRef.current;
+    setResizing(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const onMove = (ev: MouseEvent): void => {
+      if (ev.buttons === 0) {
+        // 在窗口外松开：收不到 mouseup，靠 buttons 识别收尾。
+        onUp();
+        return;
+      }
+      setSiderWidth(clampSiderWidth(startWidth + (ev.clientX - startX)));
+    };
+    const onUp = (): void => {
+      window.removeEventListener("mousemove", onMove);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      setResizing(false);
+      persistSiderWidth(widthRef.current);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp, { once: true });
+  }
+
+  function resetSiderWidth(): void {
+    setSiderWidth(DEFAULT_SIDER_WIDTH);
+    try {
+      localStorage.removeItem(SIDER_WIDTH_KEY);
+    } catch {
+      // 忽略，见 persistSiderWidth。
+    }
+  }
 
   // 全局空格（Quick Look 语义）：预览开着→关闭；完整播放器开着→播放/暂停；
   // 否则 hover 视频→空格预览（无 hover 时回退选中）。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
@@ -90,9 +175,46 @@ export default function App(): React.JSX.Element {
   return (
     <Layout style={{ height: "100vh" }}>
       <Layout>
-        <Layout.Sider width={280} theme="light" style={{ overflowY: "auto", background: "#fff" }}>
-          <Sidebar />
-        </Layout.Sider>
+        <div style={{ width: siderWidth, flex: `0 0 ${siderWidth}px`, display: "flex", position: "relative" }}>
+          <style>{`.sider-resize-handle:hover,.sider-resize-handle.resizing,.sider-resize-handle:focus-visible{background:rgba(22,119,255,.3)}`}</style>
+          <Layout.Sider
+            width={siderWidth}
+            theme="light"
+            style={{ overflowY: "auto", background: "#fff", height: "100%" }}
+          >
+            <Sidebar />
+          </Layout.Sider>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整侧边栏宽度"
+            title="拖动调整宽度，双击恢复默认"
+            tabIndex={0}
+            className={resizing ? "sider-resize-handle resizing" : "sider-resize-handle"}
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              right: -5,
+              width: 10,
+              cursor: "col-resize",
+              touchAction: "none",
+              outlineOffset: -2,
+              zIndex: 10,
+            }}
+            onMouseDown={beginResize}
+            onDoubleClick={resetSiderWidth}
+            onKeyDown={(e) => {
+              if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") {
+                return;
+              }
+              e.preventDefault();
+              const next = clampSiderWidth(siderWidth + (e.key === "ArrowRight" ? 10 : -10));
+              setSiderWidth(next);
+              persistSiderWidth(next);
+            }}
+          />
+        </div>
         <Layout.Content style={{ padding: 16, overflowY: "auto" }}>
           {emptyMaterial ? (
             <Alert
