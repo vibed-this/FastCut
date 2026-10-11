@@ -138,8 +138,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [statusMap, setStatusMap] = useState<Record<string, FileStatus>>({});
   /** 缩略图本地缓存：fileId → media:// 本地 URL；命中即秒显，不阻塞远程首绘。 */
   const [thumbLocalMap, setThumbLocalMap] = useState<Record<string, string>>({});
-  /** 当前 hover 的磁贴 file_id（未保存视频 hover 时在角标位露出下载按钮）。 */
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  /** hover 命中收敛到 store（App 层空格预览共用同一目标）。 */
   /** 磁贴直下取链中（preview 未返回、progress 事件未到前的空窗期即转圈、防连点）。 */
   const [tilePendingMap, setTilePendingMap] = useState<Record<string, boolean>>({});
 
@@ -365,12 +364,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     dispatch({ type: "explorer/push", entry: { file_id: item.file_id, name: item.name } });
   }
 
-  /** 选中视频文件（仅高亮，不打开）。 */
-  function selectFile(item: ShareItem): void {
-    dispatch({ type: "explorer/select", file: item });
-  }
-
-  /** 双击打开完整播放器（选中 + 半透明遮罩 + 标题栏 + 下载）。 */
+  /** 单击打开完整播放器（选中 + 半透明遮罩 + 标题栏 + 下载）。 */
   function openFile(item: ShareItem): void {
     dispatch({ type: "explorer/select", file: item });
     dispatch({ type: "explorer/openFile", file: item });
@@ -467,7 +461,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       !isFolder && !downloading && st?.state === "saved" && st.path !== undefined && st.path !== ""
         ? st.path
         : undefined;
-    const hovered = hoveredId === item.file_id;
+    const hovered = currentExplorer.hovered_file?.file_id === item.file_id;
     // 左上角标三态（同坑位互斥）：下载中 loading / 已保存绿勾（可拖）/ hover 未保存下载按钮。
     const cornerMark = downloading ? (
       <span
@@ -562,14 +556,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           e.preventDefault();
           window.fastcut?.startFileDrag(savedPath);
         }}
+        tabIndex={previewable ? 0 : undefined}
         onClick={() => {
-          if (isFolder) {
-            enterFolder(item);
-          } else if (isVideo) {
-            selectFile(item);
-          }
-        }}
-        onDoubleClick={() => {
           if (isFolder) {
             enterFolder(item);
           } else if (isVideo) {
@@ -580,22 +568,31 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           width: 132,
           padding: "12px 8px 8px",
           borderRadius: 8,
-          border: selected ? "1px solid #1677ff" : "1px solid transparent",
-          background: selected ? "#e6f4ff" : undefined,
+          border: selected
+            ? "1px solid #1677ff"
+            : hovered
+              ? "1px solid #91caff"
+              : "1px solid transparent",
+          background: selected ? "#e6f4ff" : hovered ? "#f0f6ff" : undefined,
           cursor: draggable ? "grab" : previewable ? "pointer" : "default",
           opacity: previewable ? 1 : 0.55,
           textAlign: "center",
+          outline: "none",
         }}
-        onMouseEnter={(e) => {
-          setHoveredId(item.file_id);
-          if (previewable && !selected) {
-            e.currentTarget.style.background = "#f5f5f5";
+        onMouseEnter={() => {
+          dispatch({ type: "explorer/hover", file: item });
+        }}
+        onMouseLeave={() => {
+          if (currentExplorer.hovered_file?.file_id === item.file_id) {
+            dispatch({ type: "explorer/hover", file: undefined });
           }
         }}
-        onMouseLeave={(e) => {
-          setHoveredId((prev) => (prev === item.file_id ? null : prev));
-          if (!selected) {
-            e.currentTarget.style.background = "";
+        onFocus={() => {
+          dispatch({ type: "explorer/hover", file: item });
+        }}
+        onBlur={() => {
+          if (currentExplorer.hovered_file?.file_id === item.file_id) {
+            dispatch({ type: "explorer/hover", file: undefined });
           }
         }}
       >

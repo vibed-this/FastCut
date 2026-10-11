@@ -43,10 +43,11 @@ export default function App(): React.JSX.Element {
   const explorer = state.explorer;
 
   // 全局空格（Quick Look 语义）：预览开着→关闭；完整播放器开着→播放/暂停；
-  // 否则选中视频→空格预览。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
+  // 否则 hover 视频→空格预览（无 hover 时回退选中）。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
   const hasExplorer = explorer !== null;
   const previewFileId = explorer?.preview_file?.file_id ?? null;
   const openedFileId = explorer?.opened_file?.file_id ?? null;
+  const hoveredFile = explorer?.hovered_file;
   const selectedFile = explorer?.selected_file;
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -72,9 +73,11 @@ export default function App(): React.JSX.Element {
         }
         return;
       }
-      if (selectedFile !== undefined && isVideoFile(selectedFile)) {
+      // hover 优先：鼠标/键盘焦点所在的视频；无 hover 时回退选中（兼容无鼠标场景）。
+      const previewTarget = hoveredFile !== undefined && isVideoFile(hoveredFile) ? hoveredFile : selectedFile;
+      if (previewTarget !== undefined && isVideoFile(previewTarget)) {
         e.preventDefault();
-        dispatch({ type: "explorer/preview", file: selectedFile });
+        dispatch({ type: "explorer/preview", file: previewTarget });
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -82,7 +85,7 @@ export default function App(): React.JSX.Element {
       window.removeEventListener("keydown", onKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatch, hasExplorer, previewFileId, openedFileId, selectedFile]);
+  }, [dispatch, hasExplorer, previewFileId, openedFileId, hoveredFile, selectedFile]);
 
   return (
     <Layout style={{ height: "100vh" }}>

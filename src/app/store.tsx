@@ -30,6 +30,8 @@ export interface Explorer {
   share_name: string;
   stack: StackEntry[];
   selected_file?: ShareItem;
+  /** hover 命中的文件（空格预览的目标，不等同于选中）。 */
+  hovered_file?: ShareItem;
   /** 空格预览中的文件（Quick Look 弹窗，无标题栏/下载按钮）。 */
   preview_file?: ShareItem;
   /** 双击打开的文件（完整播放器：半透明遮罩 + 标题栏 + 下载）。 */
@@ -72,6 +74,7 @@ export type Action =
   | { type: "explorer/push"; entry: StackEntry }
   | { type: "explorer/pop" }
   | { type: "explorer/select"; file?: ShareItem }
+  | { type: "explorer/hover"; file?: ShareItem }
   | { type: "explorer/preview"; file?: ShareItem }
   | { type: "explorer/openFile"; file?: ShareItem }
   | { type: "explorer/video"; video?: ExplorerVideo }
@@ -165,11 +168,12 @@ export function reducer(state: AppState, action: Action): AppState {
     case "explorer/close":
       return { ...state, activeShareId: null, explorer: null };
     case "explorer/navigate":
-      return mapExplorer(state, (e) => ({ ...e, stack: action.stack }));
+      return mapExplorer(state, (e) => ({ ...e, stack: action.stack, hovered_file: undefined }));
     case "explorer/push":
       return mapExplorer(state, (e) => ({
         ...e,
         stack: [...e.stack, action.entry],
+        hovered_file: undefined,
       }));
     case "explorer/pop":
       return mapExplorer(state, (e) => ({
@@ -180,6 +184,11 @@ export function reducer(state: AppState, action: Action): AppState {
       return mapExplorer(state, (e) => ({
         ...e,
         selected_file: action.file,
+      }));
+    case "explorer/hover":
+      return mapExplorer(state, (e) => ({
+        ...e,
+        hovered_file: action.file,
       }));
     case "explorer/preview":
       return mapExplorer(state, (e) => ({
