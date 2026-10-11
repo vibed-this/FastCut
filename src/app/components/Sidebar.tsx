@@ -416,8 +416,8 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
 
   return (
     <div className={className} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <style>{`.collection-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s}
-.collection-list-item:hover .ant-list-item-action,.collection-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
+      <style>{`.ant-list .ant-list-item.collection-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s;margin-inline-start:8px}
+.ant-list .ant-list-item.collection-list-item:hover .ant-list-item-action,.ant-list .ant-list-item.collection-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
       <div style={{ padding: "12px 12px 0" }}>
         <Input.Search
           data-testid="collection-search-input"
