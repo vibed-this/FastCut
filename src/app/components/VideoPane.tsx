@@ -15,8 +15,6 @@ export type VideoPaneMode = "open" | "preview";
 
 /** 视频面板属性。 */
 export interface VideoPaneProps {
-  /** 所属页签 id。 */
-  tabId: string;
   /** 播放器模式。 */
   mode: VideoPaneMode;
 }
@@ -76,10 +74,10 @@ function pickUsableTemplate(templates: VideoPreview[]): VideoPreview | undefined
  * @returns 预览元素
  */
 export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
-  const { tabId, mode } = props;
+  const { mode } = props;
   const { state, dispatch } = useStore();
   const { message } = AntdApp.useApp();
-  const tab = state.tabs.find((t) => t.id === tabId);
+  const explorer = state.explorer;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<Player | null>(null);
   const [playUrl, setPlayUrl] = useState("");
@@ -95,10 +93,10 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const file = mode === "open" ? tab?.opened_file : tab?.preview_file;
+  const file = mode === "open" ? explorer?.opened_file : explorer?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
 
-  // 下载进度/完成订阅搬到 FolderView（每 tab 一份，避免 open/preview 双实例重复 toast；
+  // 下载进度/完成订阅搬到 FolderView（单实例，避免 open/preview 双实例重复 toast；
   // 且预览触发的下载也能推进度、刷磁贴状态）。
 
   /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢容器。 */
@@ -113,7 +111,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
    * 本地文件被挪走/删除时由播放器 error 回退远端。
    */
   async function fetchPreview(): Promise<void> {
-    if (tab === undefined || file === undefined) {
+    if (explorer === undefined || explorer === null || file === undefined) {
       return;
     }
     const seq = fetchSeqRef.current + 1;
@@ -126,7 +124,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     setExpired(false);
     setExpiredMsg("");
     try {
-      const statuses = await getStatusBatch(tab.share_id, [file.file_id]);
+      const statuses = await getStatusBatch(explorer.share_id, [file.file_id]);
       if (fetchSeqRef.current !== seq) {
         return;
       }
@@ -155,10 +153,10 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   /** 单次 preview 取最高档远端（本地选档，避免重复打接口）。 */
   async function fetchRemote(seq: number): Promise<void> {
-    if (tab === undefined || file === undefined) {
+    if (explorer === null || explorer === undefined || file === undefined) {
       return;
     }
-    const list = await videoPreview(tab.share_id, file.drive_id, file.file_id);
+    const list = await videoPreview(explorer.share_id, file.drive_id, file.file_id);
     if (fetchSeqRef.current !== seq) {
       return;
     }
@@ -169,8 +167,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     setPlayUrl(picked.preview_url);
     setPlayTemplate(picked.template_id);
     dispatch({
-      type: "tabs/video",
-      tabId,
+      type: "explorer/video",
       video: { url: picked.preview_url, template: picked.template_id },
     });
   }
@@ -281,12 +278,12 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     };
   }, [playUrl, localUrl, loading, mode, fileKey]);
 
-  if (tab === undefined || file === undefined) {
+  if (explorer === null || explorer === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
   }
 
   /** 保存当前视频（auto=true 为播即存自动触发：不展示开始/完成/已存 toast，失败仍提示）。 */
-  const curTab = tab;
+  const curExplorer = explorer;
   const curFile = file;
   async function handleSave(auto = false): Promise<void> {
     if (state.materialDir === "") {
@@ -295,7 +292,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     }
     setSaving(true);
     try {
-      const statuses = await getStatusBatch(curTab.share_id, [curFile.file_id]);
+      const statuses = await getStatusBatch(curExplorer.share_id, [curFile.file_id]);
       if (statuses.some((s) => s.file_id === curFile.file_id && s.state === "saved")) {
         setSaved(true);
         if (!auto) {
@@ -308,13 +305,13 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         return;
       }
       // sub_dir 为 stack 路径名 join（根目录除外）
-      const dirs = curTab.stack
+      const dirs = curExplorer.stack
         .slice(1)
         .map((s) => s.name)
         .filter((n) => n !== "");
       const subDir = dirs.join("/");
       autoDownloadSilentIds.add(curFile.file_id);
-      await downloadVideo(playUrl, curTab.share_id, curFile.file_id, curFile.name, playTemplate, subDir);
+      await downloadVideo(playUrl, curExplorer.share_id, curFile.file_id, curFile.name, playTemplate, subDir);
       if (!auto) {
         void message.success("已开始下载");
       }
@@ -331,15 +328,15 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   /** 关闭 viewer：open 清 opened_file，preview 清 preview_file；选中保留。 */
   const closeViewer = useCallback((): void => {
-    dispatch({ type: mode === "open" ? "tabs/openFile" : "tabs/preview", tabId, file: undefined });
-    dispatch({ type: "tabs/video", tabId, video: undefined });
+    dispatch({ type: mode === "open" ? "explorer/openFile" : "explorer/preview", file: undefined });
+    dispatch({ type: "explorer/video", video: undefined });
     setPlayUrl("");
     setPlayTemplate("");
     setLocalUrl("");
     setVideoRatio(null);
     setExpired(false);
     setExpiredMsg("");
-  }, [dispatch, tabId, mode]);
+  }, [dispatch, mode]);
 
   const isOpen = mode === "open";
 

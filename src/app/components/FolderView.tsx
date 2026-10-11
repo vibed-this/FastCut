@@ -9,8 +9,8 @@ import VideoPane, { autoDownloadSilentIds } from "./VideoPane";
 
 /** 文件夹视图属性。 */
 export interface FolderViewProps {
-  /** 所属页签 id。 */
-  tabId: string;
+  /** 预留扩展，无必填项。 */
+  className?: string;
 }
 
 /** 单页条数：与后端上限 100 对齐。 */
@@ -112,10 +112,10 @@ function ThumbImage(props: { src: string; name: string; video: boolean }): React
  * @returns 文件夹浏览元素
  */
 export default function FolderView(props: FolderViewProps): React.JSX.Element {
-  const { tabId } = props;
+  const { className } = props;
   const { state, dispatch } = useStore();
   const { message } = AntdApp.useApp();
-  const tab = state.tabs.find((t) => t.id === tabId);
+  const explorer = state.explorer;
   const [items, setItems] = useState<ShareItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -158,63 +158,63 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   }
 
   const stackKey = useMemo(
-    () => (tab === undefined ? "" : tab.stack.map((s) => s.file_id).join("/")),
-    [tab],
+    () => (explorer === undefined || explorer === null ? "" : explorer.stack.map((s) => s.file_id).join("/")),
+    [explorer],
   );
   const progressKey = useMemo(
-    () => (tab?.progress === undefined ? "" : Object.keys(tab.progress).sort().join(",")),
+    () => (explorer?.progress === undefined ? "" : Object.keys(explorer.progress).sort().join(",")),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tab?.progress],
+    [explorer?.progress],
   );
 
   const load = useCallback(async () => {
-    if (tab === undefined) {
+    if (explorer === undefined || explorer === null) {
       return;
     }
-    const current = tab.stack[tab.stack.length - 1];
+    const current = explorer.stack[explorer.stack.length - 1];
     if (current === undefined) {
       return;
     }
     setLoading(true);
     try {
       // 首屏只取一页，大目录靠“加载更多”续取，避免一次拉全卡死。
-      const res = await listShare(tab.share_id, current.file_id, undefined, PAGE_SIZE);
+      const res = await listShare(explorer.share_id, current.file_id, undefined, PAGE_SIZE);
       setItems(res.items);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
       setStatusMap({});
-      await mergeStatuses(tab.share_id, res.items);
-      warmBatch(tab.share_id, res.items);
+      await mergeStatuses(explorer.share_id, res.items);
+      warmBatch(explorer.share_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, stackKey]);
+  }, [explorer?.share_id, stackKey]);
 
   /** 用 next_marker 续取下一页并追加（loadingMore/到底 guard 防重复请求）。 */
   const loadMore = useCallback(async (): Promise<void> => {
-    if (tab === undefined || nextMarker === null || loadingMore || loading) {
+    if (explorer === undefined || explorer === null || nextMarker === null || loadingMore || loading) {
       return;
     }
-    const current = tab.stack[tab.stack.length - 1];
+    const current = explorer.stack[explorer.stack.length - 1];
     if (current === undefined) {
       return;
     }
     setLoadingMore(true);
     try {
-      const res = await listShare(tab.share_id, current.file_id, nextMarker, PAGE_SIZE);
+      const res = await listShare(explorer.share_id, current.file_id, nextMarker, PAGE_SIZE);
       setItems((prev) => [...prev, ...res.items]);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
-      await mergeStatuses(tab.share_id, res.items);
-      warmBatch(tab.share_id, res.items);
+      await mergeStatuses(explorer.share_id, res.items);
+      warmBatch(explorer.share_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingMore(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, stackKey, nextMarker, loadingMore, loading]);
+  }, [explorer?.share_id, stackKey, nextMarker, loadingMore, loading]);
 
   /** 列表底部 sentinel：进入视口时自动触发下一页（含防抖 + loading guard）。 */
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -248,15 +248,15 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     return () => {
       observer.disconnect();
     };
-  }, [loadMore, nextMarker, tabId, stackKey]);
+  }, [loadMore, nextMarker, explorer?.share_id, stackKey]);
 
   useEffect(() => {
     void load();
     // 挂载与 stack 变化时刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, stackKey]);
+  }, [explorer?.share_id, stackKey]);
 
-  // 下载进度/完成订阅（每 tab 一份：open/预览触发的下载都推进度；
+  // 下载进度/完成订阅（单视图一份：open/预览触发的下载都推进度；
   // 自动下载的完成 toast 静默，手动保存仍提示；progress 变化驱动下方状态重查，磁贴绿勾自动出现）。
   useEffect(() => {
     let offProgress: (() => void) | null = null;
@@ -264,8 +264,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     let cancelled = false;
     void onDownloadProgress((p) => {
       dispatch({
-        type: "tabs/progress",
-        tabId,
+        type: "explorer/progress",
         file_id: p.file_id,
         progress: { done: p.done, total: p.total },
       });
@@ -277,7 +276,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       }
     });
     void onDownloadDone((d) => {
-      dispatch({ type: "tabs/progressClear", tabId, file_id: d.file_id });
+      dispatch({ type: "explorer/progressClear", file_id: d.file_id });
       const silent = autoDownloadSilentIds.has(d.file_id);
       autoDownloadSilentIds.delete(d.file_id);
       if (!d.ok) {
@@ -298,13 +297,13 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       offDone?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId]);
+  }, []);
 
-  // 下载进度变化后刷新该 tab 状态（含完成清空后终查一次，落"已保存"角标）；
+  // 下载进度变化后刷新当前分享状态（含完成清空后终查一次，落"已保存"角标）；
   // 用 ref 跳过挂载首跑（load 已查过），key 未变（纯 done/total 推进）不重查。
   const prevProgressKey = useRef("");
   useEffect(() => {
-    if (tab === undefined || items.length === 0) {
+    if (explorer === undefined || explorer === null || items.length === 0) {
       return;
     }
     if (progressKey === prevProgressKey.current) {
@@ -313,7 +312,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     prevProgressKey.current = progressKey;
     let cancelled = false;
     void getStatusBatch(
-      tab.share_id,
+      explorer.share_id,
       items.map((i) => i.file_id),
     )
       .then((statuses) => {
@@ -336,26 +335,26 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progressKey]);
 
-  if (tab === undefined) {
-    return <Typography.Text type="secondary">页签不存在</Typography.Text>;
+  if (explorer === undefined || explorer === null) {
+    return <Typography.Text type="secondary">暂无打开的分享，请从左侧选择</Typography.Text>;
   }
-  /** 收窄后的当前页签（闭包内直接用，避免 TS18048）。 */
-  const currentTab = tab;
+  /** 收窄后的当前浏览（闭包内直接用，避免 TS18048）。 */
+  const currentExplorer = explorer;
 
   /** 进入文件夹。 */
   function enterFolder(item: ShareItem): void {
-    dispatch({ type: "tabs/push", tabId, entry: { file_id: item.file_id, name: item.name } });
+    dispatch({ type: "explorer/push", entry: { file_id: item.file_id, name: item.name } });
   }
 
   /** 选中视频文件（仅高亮，不打开）。 */
   function selectFile(item: ShareItem): void {
-    dispatch({ type: "tabs/select", tabId, file: item });
+    dispatch({ type: "explorer/select", file: item });
   }
 
   /** 双击打开完整播放器（选中 + 半透明遮罩 + 标题栏 + 下载）。 */
   function openFile(item: ShareItem): void {
-    dispatch({ type: "tabs/select", tabId, file: item });
-    dispatch({ type: "tabs/openFile", tabId, file: item });
+    dispatch({ type: "explorer/select", file: item });
+    dispatch({ type: "explorer/openFile", file: item });
   }
 
   /** 文件夹排前面，其余保持接口返回顺序（资源管理器式）。 */
@@ -373,10 +372,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   function renderTile(item: ShareItem): React.JSX.Element {
     const isFolder = item.type === "folder";
     const previewable = isFolder || isVideoFile(item);
-    const selected = currentTab.selected_file?.file_id === item.file_id;
+    const selected = currentExplorer.selected_file?.file_id === item.file_id;
     const st = statusMap[item.file_id];
     const savedMark =
-      !isFolder && st?.state === "saved" && currentTab.progress?.[item.file_id] === undefined ? (
+      !isFolder && st?.state === "saved" && currentExplorer.progress?.[item.file_id] === undefined ? (
         <span
           data-testid="saved-mark"
           title="已保存"
@@ -467,32 +466,33 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   }
 
   return (
-    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+    <div className={className} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <Space direction="vertical" style={{ width: "100%" }} size={12}>
-          <Breadcrumb
-            items={tab.stack.map((s, idx) => ({
-              key: `${s.file_id}-${idx}`,
-              title:
-                idx === tab.stack.length - 1 ? (
-                  <span>{s.name}</span>
-                ) : (
-                  <Button
-                    type="link"
-                    style={{ padding: 0, height: "auto" }}
-                    onClick={() => {
-                      dispatch({
-                        type: "tabs/navigate",
-                        tabId,
-                        stack: tab.stack.slice(0, idx + 1),
-                      });
-                    }}
-                  >
-                    {s.name}
-                  </Button>
-                ),
-            }))}
-          />
+          <div data-testid="explorer-breadcrumb">
+            <Breadcrumb
+              items={explorer.stack.map((s, idx) => ({
+                key: `${s.file_id}-${idx}`,
+                title:
+                  idx === explorer.stack.length - 1 ? (
+                    <span>{s.name}</span>
+                  ) : (
+                    <Button
+                      type="link"
+                      style={{ padding: 0, height: "auto" }}
+                      onClick={() => {
+                        dispatch({
+                          type: "explorer/navigate",
+                          stack: explorer.stack.slice(0, idx + 1),
+                        });
+                      }}
+                    >
+                      {s.name}
+                    </Button>
+                  ),
+              }))}
+            />
+          </div>
           <Spin spinning={loading} tip="加载中…">
             {sortedItems.length === 0 && !loading ? (
               <Typography.Text type="secondary">空文件夹</Typography.Text>
@@ -536,8 +536,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           </div>
         </Space>
       </div>
-      {tab.opened_file !== undefined ? <VideoPane tabId={tabId} mode="open" /> : null}
-      {tab.preview_file !== undefined ? <VideoPane tabId={tabId} mode="preview" /> : null}
+      {explorer.opened_file !== undefined ? <VideoPane mode="open" /> : null}
+      {explorer.preview_file !== undefined ? <VideoPane mode="preview" /> : null}
     </div>
   );
 }

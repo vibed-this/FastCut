@@ -14,18 +14,18 @@ export interface StackEntry {
   name: string;
 }
 
-export interface TabVideo {
+export interface ExplorerVideo {
   url: string;
   template: string;
 }
 
-export interface TabProgress {
+export interface ExplorerProgress {
   done: number;
   total: number;
 }
 
-export interface Tab {
-  id: string;
+/** 右侧单分享浏览状态（原多页签 Tab，已去页签化：同时只看一个分享）。 */
+export interface Explorer {
   share_id: string;
   share_name: string;
   stack: StackEntry[];
@@ -34,14 +34,16 @@ export interface Tab {
   preview_file?: ShareItem;
   /** 双击打开的文件（完整播放器：半透明遮罩 + 标题栏 + 下载）。 */
   opened_file?: ShareItem;
-  video?: TabVideo;
-  progress?: Record<string, TabProgress>;
+  video?: ExplorerVideo;
+  progress?: Record<string, ExplorerProgress>;
 }
 
 export interface AppState {
   shares: SavedShare[];
-  tabs: Tab[];
-  activeTabId: string | null;
+  /** 当前打开的分享 id，无打开时为 null。 */
+  activeShareId: string | null;
+  /** 当前浏览状态，无打开分享时为 null。 */
+  explorer: Explorer | null;
   /** 素材目录：UI 侧会与 null 比较，故类型放宽，初始值仍为 ""。 */
   materialDir: string | null;
   globalError: string | null;
@@ -49,13 +51,13 @@ export interface AppState {
 
 export const initialState: AppState = {
   shares: [],
-  tabs: [],
-  activeTabId: null,
+  activeShareId: null,
+  explorer: null,
   materialDir: "",
   globalError: null,
 };
 
-// ---- Action（基建主契约 + UI 侧别名，两套同义，reducer 统一处理）----
+// ---- Action ----
 
 export type Action =
   | { type: "shares/set"; shares: SavedShare[] }
@@ -64,56 +66,46 @@ export type Action =
   | { type: "shares/remove"; share_id: string }
   | { type: "material/set"; dir: string }
   | { type: "error/set"; message: string | null }
-  | { type: "tabs/add"; tab: Tab }
-  | { type: "tabs/open"; share: SavedShare }
-  | { type: "tabs/remove"; tabId: string }
-  | { type: "tabs/close"; tabId: string }
-  | { type: "tabs/switch"; tabId: string | null }
-  | { type: "tabs/activate"; tabId: string }
-  | { type: "tabs/navigate"; tabId: string; stack: StackEntry[] }
-  | { type: "tabs/setStack"; tabId: string; stack: StackEntry[] }
-  | { type: "tabs/push"; tabId: string; entry: StackEntry }
-  | { type: "tabs/pop"; tabId: string }
-  | { type: "tabs/select"; tabId: string; file?: ShareItem }
-  | { type: "tabs/selectFile"; tabId: string; file?: ShareItem }
-  | { type: "tabs/preview"; tabId: string; file?: ShareItem }
-  | { type: "tabs/openFile"; tabId: string; file?: ShareItem }
-  | { type: "tabs/video"; tabId: string; video?: TabVideo }
+  | { type: "explorer/open"; share: SavedShare }
+  | { type: "explorer/close" }
+  | { type: "explorer/navigate"; stack: StackEntry[] }
+  | { type: "explorer/push"; entry: StackEntry }
+  | { type: "explorer/pop" }
+  | { type: "explorer/select"; file?: ShareItem }
+  | { type: "explorer/preview"; file?: ShareItem }
+  | { type: "explorer/openFile"; file?: ShareItem }
+  | { type: "explorer/video"; video?: ExplorerVideo }
   | {
-      type: "tabs/progress";
-      tabId: string;
+      type: "explorer/progress";
       file_id: string;
-      progress: TabProgress;
+      progress: ExplorerProgress;
     }
-  | { type: "tabs/setProgress"; tabId: string; fileId: string; done: number; total: number }
-  | { type: "tabs/progressClear"; tabId: string; file_id: string }
-  | { type: "tabs/clearProgress"; tabId: string; fileId: string };
+  | { type: "explorer/setProgress"; fileId: string; done: number; total: number }
+  | { type: "explorer/progressClear"; file_id: string }
+  | { type: "explorer/clearProgress"; fileId: string };
 
-function mapTab(state: AppState, tabId: string, fn: (t: Tab) => Tab): AppState {
-  return {
-    ...state,
-    tabs: state.tabs.map((t) => (t.id === tabId ? fn(t) : t)),
-  };
+function mapExplorer(state: AppState, fn: (e: Explorer) => Explorer): AppState {
+  if (state.explorer === null) return state;
+  return { ...state, explorer: fn(state.explorer) };
 }
 
 function setProgress(
   state: AppState,
-  tabId: string,
   fileId: string,
-  progress: TabProgress,
+  progress: ExplorerProgress,
 ): AppState {
-  return mapTab(state, tabId, (t) => ({
-    ...t,
-    progress: { ...t.progress, [fileId]: progress },
+  return mapExplorer(state, (e) => ({
+    ...e,
+    progress: { ...e.progress, [fileId]: progress },
   }));
 }
 
-function clearProgress(state: AppState, tabId: string, fileId: string): AppState {
-  return mapTab(state, tabId, (t) => {
-    if (!t.progress) return t;
-    const progress = { ...t.progress };
+function clearProgress(state: AppState, fileId: string): AppState {
+  return mapExplorer(state, (e) => {
+    if (!e.progress) return e;
+    const progress = { ...e.progress };
     delete progress[fileId];
-    return { ...t, progress };
+    return { ...e, progress };
   });
 }
 
@@ -138,112 +130,85 @@ export function reducer(state: AppState, action: Action): AppState {
         shares: state.shares.map((s) =>
           s.share_id === action.share_id ? { ...s, name: action.name } : s,
         ),
-        tabs: state.tabs.map((t) =>
-          t.share_id === action.share_id
-            ? { ...t, share_name: action.name }
-            : t,
-        ),
+        explorer:
+          state.explorer !== null && state.explorer.share_id === action.share_id
+            ? { ...state.explorer, share_name: action.name }
+            : state.explorer,
       };
     case "shares/remove": {
-      const tabs = state.tabs.filter((t) => t.share_id !== action.share_id);
+      const shares = state.shares.filter((s) => s.share_id !== action.share_id);
+      const closingCurrent =
+        state.explorer !== null && state.explorer.share_id === action.share_id;
       return {
         ...state,
-        shares: state.shares.filter((s) => s.share_id !== action.share_id),
-        tabs,
-        activeTabId:
-          state.activeTabId !== null &&
-          !tabs.some((t) => t.id === state.activeTabId)
-            ? (tabs[tabs.length - 1]?.id ?? null)
-            : state.activeTabId,
+        shares,
+        activeShareId: closingCurrent ? null : state.activeShareId,
+        explorer: closingCurrent ? null : state.explorer,
       };
     }
     case "material/set":
       return { ...state, materialDir: action.dir };
     case "error/set":
       return { ...state, globalError: action.message };
-    case "tabs/add": {
-      const exists = state.tabs.some((t) => t.id === action.tab.id);
-      const tabs = exists
-        ? state.tabs.map((t) => (t.id === action.tab.id ? action.tab : t))
-        : [...state.tabs, action.tab];
-      return { ...state, tabs, activeTabId: action.tab.id };
-    }
-    case "tabs/open": {
-      // 根目录 file_id 约定为 "root"（待后端确认），stack[0] 即根。
-      const tab: Tab = {
-        id: action.share.share_id,
-        share_id: action.share.share_id,
-        share_name: action.share.name,
-        stack: [{ file_id: "root", name: action.share.name }],
+    case "explorer/open": {
+      // 根目录 file_id 约定为 "root"，stack[0] 即根。
+      return {
+        ...state,
+        activeShareId: action.share.share_id,
+        explorer: {
+          share_id: action.share.share_id,
+          share_name: action.share.name,
+          stack: [{ file_id: "root", name: "分享根目录" }],
+        },
       };
-      const exists = state.tabs.some((t) => t.id === tab.id);
-      const tabs = exists
-        ? state.tabs.map((t) => (t.id === tab.id ? { ...t, share_name: tab.share_name } : t))
-        : [...state.tabs, tab];
-      return { ...state, tabs, activeTabId: tab.id };
     }
-    case "tabs/remove":
-    case "tabs/close": {
-      const tabs = state.tabs.filter((t) => t.id !== action.tabId);
-      const activeTabId =
-        state.activeTabId === action.tabId
-          ? (tabs[tabs.length - 1]?.id ?? null)
-          : state.activeTabId;
-      return { ...state, tabs, activeTabId };
-    }
-    case "tabs/switch":
-    case "tabs/activate":
-      return { ...state, activeTabId: action.tabId };
-    case "tabs/navigate":
-    case "tabs/setStack":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
-        stack: action.stack,
+    case "explorer/close":
+      return { ...state, activeShareId: null, explorer: null };
+    case "explorer/navigate":
+      return mapExplorer(state, (e) => ({ ...e, stack: action.stack }));
+    case "explorer/push":
+      return mapExplorer(state, (e) => ({
+        ...e,
+        stack: [...e.stack, action.entry],
       }));
-    case "tabs/push":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
-        stack: [...t.stack, action.entry],
+    case "explorer/pop":
+      return mapExplorer(state, (e) => ({
+        ...e,
+        stack: e.stack.slice(0, -1),
       }));
-    case "tabs/pop":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
-        stack: t.stack.slice(0, -1),
-      }));
-    case "tabs/select":
-    case "tabs/selectFile":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
+    case "explorer/select":
+      return mapExplorer(state, (e) => ({
+        ...e,
         selected_file: action.file,
       }));
-    case "tabs/preview":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
+    case "explorer/preview":
+      return mapExplorer(state, (e) => ({
+        ...e,
         preview_file: action.file,
       }));
-    case "tabs/openFile":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
+    case "explorer/openFile":
+      return mapExplorer(state, (e) => ({
+        ...e,
         // 双击打开完整播放器时关掉空格预览，两者不叠加。
         preview_file: undefined,
         opened_file: action.file,
       }));
-    case "tabs/video":
-      return mapTab(state, action.tabId, (t) => ({
-        ...t,
+    case "explorer/video":
+      return mapExplorer(state, (e) => ({
+        ...e,
         video: action.video,
       }));
-    case "tabs/progress":
-      return setProgress(state, action.tabId, action.file_id, action.progress);
-    case "tabs/setProgress":
-      return setProgress(state, action.tabId, action.fileId, {
+    case "explorer/progress":
+      return setProgress(state, action.file_id, action.progress);
+    case "explorer/setProgress":
+      return setProgress(state, action.fileId, {
         done: action.done,
         total: action.total,
       });
-    case "tabs/progressClear":
-      return clearProgress(state, action.tabId, action.file_id);
-    case "tabs/clearProgress":
-      return clearProgress(state, action.tabId, action.fileId);
+    case "explorer/progressClear":
+      return clearProgress(state, action.file_id);
+    case "explorer/clearProgress":
+      return clearProgress(state, action.fileId);
   }
 }
 

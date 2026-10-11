@@ -48,22 +48,12 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
   const [renameName, setRenameName] = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
 
-  /** 点击条目打开 tab，已存在则激活。 */
+  /** 点击条目打开分享（单视图，直接切换）。 */
   function handleOpen(share: SavedShare): void {
-    const existing = state.tabs.find((t) => t.share_id === share.share_id);
-    if (existing !== undefined) {
-      dispatch({ type: "tabs/switch", tabId: existing.id });
+    if (state.activeShareId === share.share_id) {
       return;
     }
-    dispatch({
-      type: "tabs/add",
-      tab: {
-        id: share.share_id,
-        share_id: share.share_id,
-        share_name: share.name,
-        stack: [{ file_id: "root", name: "分享根目录" }],
-      },
-    });
+    dispatch({ type: "explorer/open", share });
   }
 
   /** 提交添加分享。 */
@@ -79,15 +69,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
       const pwd = addForm.pwd.trim() === "" ? undefined : addForm.pwd.trim();
       const created = await addShare(url, pwd);
       dispatch({ type: "shares/set", shares: [...state.shares, created] });
-      dispatch({
-        type: "tabs/add",
-        tab: {
-          id: created.share_id,
-          share_id: created.share_id,
-          share_name: created.name,
-          stack: [{ file_id: "root", name: "分享根目录" }],
-        },
-      });
+      dispatch({ type: "explorer/open", share: created });
       setAddOpen(false);
       setAddForm({ url: "", pwd: "" });
     } catch (e) {
@@ -133,10 +115,9 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
         type: "shares/set",
         shares: state.shares.filter((s) => s.share_id !== share.share_id),
       });
-      // 同步关闭该分享已打开的页签
-      const tab = state.tabs.find((t) => t.share_id === share.share_id);
-      if (tab !== undefined) {
-        dispatch({ type: "tabs/remove", tabId: tab.id });
+      // 同步关闭当前正在看的分享
+      if (state.explorer?.share_id === share.share_id) {
+        dispatch({ type: "explorer/close" });
       }
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
@@ -182,9 +163,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           dataSource={state.shares}
           locale={{ emptyText: "暂无分享，请先添加" }}
           renderItem={(share: SavedShare) => {
-            const active = state.tabs.some(
-              (t) => t.share_id === share.share_id && t.id === state.activeTabId,
-            );
+            const active = state.activeShareId === share.share_id;
             return (
               <List.Item
                 style={{

@@ -164,12 +164,12 @@ async function discoverIds(
   throw new Error("所有子目录均无 mp4");
 }
 
-/** UI 上打开分享并进入指定文件夹（幂等：tab 已存在则直接点）。 */
+/** UI 上打开分享并进入指定文件夹（单视图：点左侧分享即切换右侧内容）。 */
 async function uiOpenShareAndFolder(page: Page, folderName: string): Promise<void> {
   const item = page.locator('[data-testid="share-item"]', { hasText: SHARE_TITLE_PART }).first();
   await expect(item).toBeVisible({ timeout: 60_000 });
   await item.click();
-  await expect(page.locator('[data-testid="tab-title"]').first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator('[data-testid="explorer-breadcrumb"]').first()).toBeVisible({ timeout: 60_000 });
   // 根目录应为文件夹磁贴；点击与 IPC 发现同名的那个
   const folders = page.locator('[data-testid="enter-folder"]');
   await expect(folders.first()).toBeVisible({ timeout: 60_000 });
