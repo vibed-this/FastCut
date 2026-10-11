@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } from "electron";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -319,6 +319,14 @@ function registerIpcHandlers(userDataDir: string): void {
       return { cached };
     } catch (e) {
       throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("clipboard_read_text", () => {
+    try {
+      return clipboard.readText();
+    } catch {
+      return "";
     }
   });
 

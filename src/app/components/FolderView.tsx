@@ -35,11 +35,13 @@ import {
   onDownloadDone,
   onDownloadProgress,
   videoPreview,
+  readClipboardText,
   warmLocalVideoThumbnails,
   warmThumbnails,
   xhsImport,
 } from "../api";
 import type { FileStatus, FsEntry, ShareItem } from "../api";
+import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore, type ExplorerFile } from "../store";
 import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
 
@@ -198,6 +200,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [xhsSelected, setXhsSelected] = useState<string[]>([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importUrl, setImportUrl] = useState("");
+  /** 导入弹窗输入是否仍是初始空值（剪贴板自动填入不覆盖用户输入）。 */
+  const importPristineRef = useRef(true);
   const [importError, setImportError] = useState("");
   const [importConfirming, setImportConfirming] = useState(false);
   const [mkdirOpen, setMkdirOpen] = useState(false);
@@ -1024,7 +1028,20 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
                 onClick={() => {
                   setImportUrl("");
                   setImportError("");
+                  importPristineRef.current = true;
                   setImportOpen(true);
+                  // 剪贴板有小红书链接自动填入（只动 pristine 输入框）
+                  void readClipboardText().then((text) => {
+                    const hit = detectShareLink(text);
+                    if (hit === null || hit.kind !== "xiaohongshu") {
+                      return;
+                    }
+                    if (!importPristineRef.current) {
+                      return;
+                    }
+                    importPristineRef.current = false;
+                    setImportUrl(hit.url);
+                  });
                 }}
               >
                 导入链接
@@ -1188,6 +1205,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
             placeholder="粘贴小红书分享链接"
             value={importUrl}
             onChange={(e) => {
+              importPristineRef.current = false;
               setImportUrl(e.target.value);
             }}
             onPressEnter={() => {

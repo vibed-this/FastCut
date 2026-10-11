@@ -1,5 +1,5 @@
 /** 侧边栏：合集列表的展示与管理入口。 */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   App as AntdApp,
   Button,
@@ -18,8 +18,9 @@ import {
   EllipsisOutlined,
   PlusOutlined,
 } from "@ant-design/icons";
-import { addCollection, pickFolder, removeCollection, renameCollection, setConfig } from "../api";
+import { addCollection, pickFolder, readClipboardText, removeCollection, renameCollection, setConfig } from "../api";
 import type { Collection, CollectionKind } from "../api";
+import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore } from "../store";
 
 /** 新建合集弹窗内部的表单状态。 */
@@ -59,6 +60,29 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
   });
   const [addError, setAddError] = useState("");
   const [addLoading, setAddLoading] = useState(false);
+  /** 新建弹窗表单是否仍是打开时的初始值（剪贴板自动填入只动 pristine 表单，不覆盖用户输入）。 */
+  const addPristineRef = useRef(true);
+
+  /** 打开新建合集弹窗：重置表单后读剪贴板，命中分享链接自动填入。 */
+  function handleOpenAdd(): void {
+    setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
+    setAddError("");
+    addPristineRef.current = true;
+    setAddOpen(true);
+    void readClipboardText().then((text) => {
+      const hit = detectShareLink(text);
+      if (hit === null || !addPristineRef.current) {
+        return;
+      }
+      addPristineRef.current = false;
+      if (hit.kind === "alipan") {
+        setAddForm({ kind: "alipan", url: hit.url, pwd: hit.pwd ?? "", name: "" });
+      } else {
+        // 小红书新建只需合集名：切到对应页，链接后续在导入弹窗自动填入
+        setAddForm({ kind: "xiaohongshu", url: "", pwd: "", name: "" });
+      }
+    });
+  }
   const [renameTarget, setRenameTarget] = useState<Collection | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
@@ -286,9 +310,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
           icon={<PlusOutlined />}
           block
           onClick={() => {
-            setAddForm({ kind: "alipan", url: "", pwd: "", name: "" });
-            setAddError("");
-            setAddOpen(true);
+            handleOpenAdd();
           }}
         >
           新建合集
@@ -348,6 +370,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
             data-testid="collection-kind-radio"
             value={addForm.kind}
             onChange={(e) => {
+              addPristineRef.current = false;
               setAddForm((s) => ({ ...s, kind: e.target.value as CollectionKind }));
               setAddError("");
             }}
@@ -364,6 +387,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                   placeholder="https://www.alipan.com/s/xxxx"
                   value={addForm.url}
                   onChange={(e) => {
+                    addPristineRef.current = false;
                     setAddForm((s) => ({ ...s, url: e.target.value }));
                   }}
                 />
@@ -375,6 +399,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                   placeholder="无密码可不填"
                   value={addForm.pwd}
                   onChange={(e) => {
+                    addPristineRef.current = false;
                     setAddForm((s) => ({ ...s, pwd: e.target.value }));
                   }}
                 />
@@ -388,6 +413,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                 placeholder="例如：美食探店第1期"
                 value={addForm.name}
                 onChange={(e) => {
+                  addPristineRef.current = false;
                   setAddForm((s) => ({ ...s, name: e.target.value }));
                 }}
               />

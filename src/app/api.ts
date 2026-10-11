@@ -505,6 +505,19 @@ export function warmLocalVideoThumbnails(files: string[]): Promise<Record<string
   return invoke("thumbnail_local_warm", { files }).then((r) => r.cached);
 }
 
+/**
+ * 读系统剪贴板纯文本（main 侧 clipboard，无 renderer 权限问题）。
+ * best-effort：桥不可用/失败一律返回空串，调用方按无链接处理。
+ */
+export async function readClipboardText(): Promise<string> {
+  try {
+    const text = await invoke("clipboard_read_text", {});
+    return typeof text === "string" ? text : "";
+  } catch {
+    return "";
+  }
+}
+
 // ---- 事件订阅（主契约：返回 Promise<UnlistenFn>）----
 
 export function onDownloadProgress(
