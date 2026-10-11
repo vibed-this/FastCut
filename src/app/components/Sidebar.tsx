@@ -8,7 +8,6 @@ import {
   Input,
   List,
   Modal,
-  Popconfirm,
   Typography,
 } from "antd";
 import { DeleteOutlined, EllipsisOutlined, PlusOutlined } from "@ant-design/icons";
@@ -39,7 +38,7 @@ export interface SidebarProps {
 export default function Sidebar(props: SidebarProps): React.JSX.Element {
   const { className } = props;
   const { state, dispatch } = useStore();
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState<AddFormState>({ url: "", pwd: "" });
   const [addError, setAddError] = useState("");
@@ -107,7 +106,20 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     }
   }
 
-  /** 确认删除分享。 */
+  /** 确认删除分享（收纳在更多菜单内，二次确认）。 */
+  function confirmRemove(share: SavedShare): void {
+    modal.confirm({
+      title: "确定删除该分享吗？",
+      okText: "删除",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: () => {
+        void handleRemove(share);
+      },
+    });
+  }
+
+  /** 执行删除分享。 */
   async function handleRemove(share: SavedShare): Promise<void> {
     try {
       await removeShare(share.share_id);
@@ -143,6 +155,8 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
 
   return (
     <div className={className} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <style>{`.share-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s}
+.share-list-item:hover .ant-list-item-action,.share-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
       <div style={{ padding: 12 }}>
         <Button
           data-testid="add-share-btn"
@@ -166,6 +180,7 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
             const active = state.activeShareId === share.share_id;
             return (
               <List.Item
+                className="share-list-item"
                 style={{
                   background: active ? "#e6f4ff" : undefined,
                   borderRadius: 8,
@@ -190,6 +205,15 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                             setRenameName(share.name);
                           },
                         },
+                        {
+                          key: "remove",
+                          label: "删除",
+                          danger: true,
+                          icon: <DeleteOutlined />,
+                          onClick: () => {
+                            confirmRemove(share);
+                          },
+                        },
                       ],
                     }}
                   >
@@ -203,29 +227,6 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                       }}
                     />
                   </Dropdown>,
-                  <Popconfirm
-                    key="remove"
-                    title="确定删除该分享吗？"
-                    okText="删除"
-                    cancelText="取消"
-                    onConfirm={() => {
-                      void handleRemove(share);
-                    }}
-                    onCancel={(e) => {
-                      e?.stopPropagation();
-                    }}
-                  >
-                    <Button
-                      type="text"
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      aria-label="删除分享"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                      }}
-                    />
-                  </Popconfirm>,
                 ]}
               >
                 <List.Item.Meta
