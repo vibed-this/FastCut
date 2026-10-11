@@ -327,10 +327,9 @@ test("c. 预览：readyState>=2 且无过期告警", async () => {
       void v.play().catch(() => undefined);
     }
   });
-  // 注：已知应用 bug（见最终报告）：VideoPane 的 player effect 只依赖 [playUrl]，
-  // 而 Card loading=true 期间会卸载 <video>（antd Card 源码 `loading ? loadingBlock : children`），
-  // playUrl 恰在 loading 期间就绪 → effect 因 ref 为空直接返回 → loading=false 后的重挂载不再触发 effect，
-  // video.src 永不设置，readyState 恒为 0。以下断言如实失败，不绕行。
+  // 注：曾有 player effect 只依赖 [playUrl] 导致 loading 期重挂载后 src 永不设置的
+  // 黑屏 bug（Card loading 会卸载 <video>），已修复：effect 依赖改为 [playUrl, loading]。
+  // 以下断言验证修复：readyState 必须达到 >= 2。
   await win.waitForFunction(
     () => {
       const v = document.querySelector<HTMLVideoElement>('[data-testid="preview-video"]');

@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 预览桶有 Referer 防盗链：dev 下 localhost Referer 会 403，
+         file:// 无 Referer 才能播；统一去掉 renderer 侧 Referer。 -->
+    <meta name="referrer" content="no-referrer" />
     <title>FastCut</title>
     <style>
       :root {

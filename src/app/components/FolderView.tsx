@@ -1,4 +1,4 @@
-/** 文件夹浏览：面包屑 + 缩略图网格。 */
+/** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，禁止逐项调 preview）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Badge, Breadcrumb, Button, Space, Spin, Typography } from "antd";
 import { FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
@@ -44,6 +44,82 @@ function formatSize(size?: number): string {
     i += 1;
   }
   return `${v.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * 服务端快照图：加载中灰底骨架占位（含图标），载入后淡入；失败回退默认图标。
+ *
+ * @param props - 图片属性
+ * @returns 缩略图元素
+ */
+function ThumbImage(props: { src: string; name: string; video: boolean }): React.JSX.Element {
+  const { src, name, video } = props;
+  const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+    setLoaded(false);
+  }, [src]);
+  const placeholderIcon = video ? (
+    <VideoCameraOutlined style={{ fontSize: 40, color: "#bfbfbf" }} />
+  ) : (
+    <FileOutlined style={{ fontSize: 40, color: "#bfbfbf" }} />
+  );
+  if (failed) {
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#f0f0f0",
+        }}
+      >
+        {placeholderIcon}
+      </div>
+    );
+  }
+  return (
+    <div style={{ position: "relative", width: "100%", height: "100%", background: "#000" }}>
+      {!loaded ? (
+        <div
+          data-testid="thumb-placeholder"
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#f0f0f0",
+          }}
+        >
+          {placeholderIcon}
+        </div>
+      ) : null}
+      <img
+        src={src}
+        alt={name}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        onLoad={() => {
+          setLoaded(true);
+        }}
+        onError={() => {
+          setFailed(true);
+        }}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          display: "block",
+          opacity: loaded ? 1 : 0,
+          transition: "opacity 0.25s ease-in",
+        }}
+      />
+    </div>
+  );
 }
 
 /**
@@ -115,9 +191,9 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabId, stackKey]);
 
-  /** 用 next_marker 续取下一页并追加。 */
-  async function loadMore(): Promise<void> {
-    if (tab === undefined || nextMarker === null || loadingMore) {
+  /** 用 next_marker 续取下一页并追加（loadingMore/到底 guard 防重复请求）。 */
+  const loadMore = useCallback(async (): Promise<void> => {
+    if (tab === undefined || nextMarker === null || loadingMore || loading) {
       return;
     }
     const current = tab.stack[tab.stack.length - 1];
@@ -135,7 +211,42 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     } finally {
       setLoadingMore(false);
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId, stackKey, nextMarker, loadingMore, loading]);
+
+  /** 列表底部 sentinel：进入视口时自动触发下一页（含防抖 + loading guard）。 */
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const lastAutoLoadAt = useRef(0);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (el === null || nextMarker === null) {
+      return;
+    }
+    // 非浏览器/测试环境无 IntersectionObserver 时不自动触发，保留手动按钮。
+    if (typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry === undefined || !entry.isIntersecting) {
+          return;
+        }
+        // 防抖：300ms 内重复进入视口只触发一次；loading guard 由 loadMore 内部保证。
+        const now = Date.now();
+        if (now - lastAutoLoadAt.current < 300) {
+          return;
+        }
+        lastAutoLoadAt.current = now;
+        void loadMore();
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+    };
+  }, [loadMore, nextMarker, tabId, stackKey]);
 
   useEffect(() => {
     void load();
@@ -223,13 +334,15 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     return <Badge status="processing" text="下载中" />;
   }
 
-  /** 单个缩略图磁贴。 */
+  /** 单个缩略图磁贴（图片/视频均用服务端 thumbnail 快照，无则回退图标）。 */
   function renderTile(item: ShareItem): React.JSX.Element {
     const isFolder = item.type === "folder";
     const previewable = isFolder || isVideoFile(item);
     const selected = currentTab.selected_file?.file_id === item.file_id;
-    const icon = isFolder ? (
+    const cover = isFolder ? (
       <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
+    ) : item.thumbnail !== undefined && item.thumbnail !== "" ? (
+      <ThumbImage src={item.thumbnail} name={item.name} video={isVideoFile(item)} />
     ) : isVideoFile(item) ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
     ) : (
@@ -272,8 +385,16 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           }
         }}
       >
-        <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          {icon}
+        <div
+          style={{
+            height: 64,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+          }}
+        >
+          {cover}
         </div>
         <Typography.Paragraph
           ellipsis={{ rows: 2, tooltip: item.name }}
@@ -327,28 +448,39 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
               </div>
             )}
           </Spin>
-          <div style={{ display: "flex", justifyContent: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            {/* 滚动自动加载 sentinel：进入视口即触发 loadMore */}
+            <div ref={sentinelRef} data-testid="load-more-sentinel" style={{ height: 1, width: "100%" }} />
             {nextMarker !== null ? (
-              <Button
-                data-testid="load-more"
-                loading={loadingMore}
-                onClick={() => void loadMore()}
-              >
-                加载更多（已加载 {items.length} 项）
-              </Button>
+              loadingMore ? (
+                <Spin size="small" tip={`加载更多中…（已加载 ${items.length} 项）`}>
+                  <span />
+                </Spin>
+              ) : (
+                <Typography.Text type="secondary">
+                  上滑自动加载更多（已加载 {items.length} 项）
+                </Typography.Text>
+              )
             ) : (
               items.length > 0 && (
-                <Typography.Text type="secondary">已加载全部 {items.length} 项</Typography.Text>
+                <Typography.Text type="secondary">已全部加载（共 {items.length} 项）</Typography.Text>
               )
             )}
+            {/* 手动兜底：自动加载失败时可点击；e2e 亦可沿用 data-testid="load-more" */}
+            {nextMarker !== null && !loadingMore ? (
+              <Button
+                data-testid="load-more"
+                size="small"
+                type="link"
+                onClick={() => void loadMore()}
+              >
+                手动加载更多
+              </Button>
+            ) : null}
           </div>
         </Space>
       </div>
-      {tab.selected_file !== undefined ? (
-        <div style={{ width: 480, flexShrink: 0 }}>
-          <VideoPane tabId={tabId} />
-        </div>
-      ) : null}
+      {tab.selected_file !== undefined ? <VideoPane tabId={tabId} /> : null}
     </div>
   );
 }

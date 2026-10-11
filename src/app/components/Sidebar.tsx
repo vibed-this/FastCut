@@ -271,16 +271,6 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
                       {share.name}
                     </Typography.Text>
                   }
-                  description={
-                    <Typography.Text
-                      type="secondary"
-                      ellipsis
-                      style={{ fontSize: 12, maxWidth: 130 }}
-                      title={share.url}
-                    >
-                      {share.url}
-                    </Typography.Text>
-                  }
                 />
               </List.Item>
             );

@@ -1,22 +1,43 @@
-/** 视频预览与保存面板。 */
-import { useEffect, useRef, useState } from "react";
-import { Alert, App as AntdApp, Button, Card, Space, Tag, Typography } from "antd";
+/** 视频预览与保存面板：全屏 Modal 播放器。 */
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, App as AntdApp, Button, Space, Spin, Tag, Typography } from "antd";
 import Hls from "hls.js";
-import {
-  downloadVideo,
-  getStatusBatch,
-  onDownloadDone,
-  onDownloadProgress,
-  pickPreviewUrl,
-  videoPreview,
-} from "../api";
+import { downloadVideo, getStatusBatch, onDownloadDone, onDownloadProgress, videoPreview } from "../api";
 import type { VideoPreview } from "../api";
 import { useStore } from "../store";
+import VideoPlayerModal from "./VideoPlayerModal";
 
 /** 视频面板属性。 */
 export interface VideoPaneProps {
   /** 所属页签 id。 */
   tabId: string;
+}
+
+/**
+ * 本地选档（与后端 pick_template 同语义）：显式档精确命中，miss 回退最大宽度档。
+ *
+ * @param templates - 预览档列表
+ * @param preference - 偏好档
+ * @returns 选中的档，无可用时 undefined
+ */
+function pickUsableTemplate(templates: VideoPreview[], preference: string): VideoPreview | undefined {
+  const usable = templates.filter(
+    (t) => t.status === "finished" && typeof t.preview_url === "string" && t.preview_url.length > 0,
+  );
+  if (usable.length === 0) {
+    return undefined;
+  }
+  const want = preference.trim().toUpperCase();
+  if (want !== "" && want !== "AUTO") {
+    const hit = usable.find((t) => t.template_id.toUpperCase() === want);
+    if (hit !== undefined) {
+      return hit;
+    }
+  }
+  return usable.reduce<VideoPreview | undefined>(
+    (best, cur) => (best === undefined || (cur.template_width ?? 0) >= (best.template_width ?? 0) ? cur : best),
+    undefined,
+  );
 }
 
 /**
@@ -97,28 +118,51 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     // 仅在已触发过保存后由事件驱动刷新，此处不主动轮询
   });
 
-  /** 拉取可用档与播放地址。 */
+  /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢 video。 */
+  const fetchSeqRef = useRef(0);
+
+  /** 拉取可用档与播放地址（单次 preview，本地选档，避免重复打接口）。 */
   async function fetchPreview(): Promise<void> {
     if (tab === undefined || file === undefined) {
       return;
     }
+    const seq = fetchSeqRef.current + 1;
+    fetchSeqRef.current = seq;
     setLoading(true);
     setExpired(false);
     setExpiredMsg("");
     try {
       const list = await videoPreview(tab.share_id, file.drive_id, file.file_id);
+      if (fetchSeqRef.current !== seq) {
+        return;
+      }
       setTemplates(list);
-      const picked = await pickPreviewUrl(tab.share_id, file.drive_id, file.file_id, definition);
-      setPlayUrl(picked.url);
-      dispatch({ type: "tabs/video", tabId, video: { url: picked.url, template: picked.template } });
+      const picked = pickUsableTemplate(list, definition);
+      if (picked === undefined || !picked.preview_url) {
+        throw new Error(`没有可用的预览档（偏好 ${definition}）`);
+      }
+      setPlayUrl(picked.preview_url);
+      dispatch({
+        type: "tabs/video",
+        tabId,
+        video: { url: picked.preview_url, template: picked.template_id },
+      });
       const statuses = await getStatusBatch(tab.share_id, [file.file_id]);
+      if (fetchSeqRef.current !== seq) {
+        return;
+      }
       setSaved(statuses.some((s) => s.file_id === file.file_id && s.state === "saved"));
     } catch (e) {
+      if (fetchSeqRef.current !== seq) {
+        return;
+      }
       setExpired(true);
       setExpiredMsg(e instanceof Error ? e.message : String(e));
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (fetchSeqRef.current === seq) {
+        setLoading(false);
+      }
     }
   }
 
@@ -129,6 +173,9 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   // 播放器接入：loading 期间 video 会被 skeleton 卸载重挂，必须把 loading
   // 纳入依赖，否则 playUrl 不变时 effect 不再跑、src 永不设置（黑屏）。
+  // 注意：桌面 Chromium 对 mpegurl 的 canPlayType 返回 "maybe"，但 <video> 直塞
+  // m3u8 在 http(s) origin 下会被 ORB 拦截（dev 必现 media_err=4），因此 m3u8
+  // 一律走 hls.js（cors 拉取），不信任 canPlayType。
   useEffect(() => {
     const video = videoRef.current;
     if (video === null || playUrl === "") {
@@ -139,12 +186,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
-    const nativeHls =
-      playUrl.includes(".m3u8") &&
-      video.canPlayType("application/vnd.apple.mpegurl") !== "";
-    if (nativeHls) {
-      video.src = playUrl;
-    } else if (playUrl.includes(".m3u8") && Hls.isSupported()) {
+    if (playUrl.includes(".m3u8") && Hls.isSupported()) {
       const hls = new Hls();
       hlsRef.current = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -222,20 +264,61 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
 
   const noMaterial = state.materialDir === "";
 
+  /** 关闭全屏预览：Modal 的 ESC / 遮罩 / 关闭按钮统一走这里。 */
+  const closePreview = useCallback((): void => {
+    dispatch({ type: "tabs/select", tabId, file: undefined });
+    dispatch({ type: "tabs/video", tabId, video: undefined });
+    setPlayUrl("");
+    setTemplates([]);
+  }, [dispatch, tabId]);
+
   return (
-    <Card title={file.name} size="small" loading={loading}>
+    <VideoPlayerModal
+      open
+      title={file.name}
+      onClose={closePreview}
+      footer={
+        <Space>
+          <Button
+            data-testid="save-video"
+            type="primary"
+            loading={saving}
+            disabled={saved || noMaterial}
+            onClick={() => {
+              void handleSave();
+            }}
+          >
+            {saved ? "已保存" : "保存"}
+          </Button>
+          <Button onClick={closePreview}>关闭预览</Button>
+        </Space>
+      }
+    >
       <Space direction="vertical" style={{ width: "100%" }} size={12}>
-        <video
-          ref={videoRef}
-          data-testid="preview-video"
-          controls
-          style={{ width: "100%", background: "#000" }}
-        />
+        <Spin spinning={loading} tip="加载中…">
+          <video
+            ref={videoRef}
+            data-testid="preview-video"
+            controls
+            preload="metadata"
+            onError={() => {
+              const v = videoRef.current;
+              const code = v?.error ? ` media_err=${v.error.code}` : "";
+              setExpired(true);
+              setExpiredMsg(`video 元素加载失败${code}，点“重取链接”重试`);
+            }}
+            style={{ width: "100%", maxHeight: "60vh", background: "#000" }}
+          />
+        </Spin>
         <div>
-          <Typography.Text type="secondary">可用清晰度：</Typography.Text>
+          <Typography.Text type="secondary" style={{ color: "#bbb" }}>
+            可用清晰度：
+          </Typography.Text>
           <Space wrap style={{ marginTop: 6 }}>
             {templates.length === 0 ? (
-              <Typography.Text type="secondary">暂无可用档</Typography.Text>
+              <Typography.Text type="secondary" style={{ color: "#888" }}>
+                暂无可用档
+              </Typography.Text>
             ) : (
               templates.map((t) => (
                 <Tag key={t.template_id} color={t.preview_url ? "green" : "default"}>
@@ -263,31 +346,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
             }
           />
         ) : null}
-        <Space>
-          <Button
-            data-testid="save-video"
-            type="primary"
-            loading={saving}
-            disabled={saved || noMaterial}
-            onClick={() => {
-              void handleSave();
-            }}
-          >
-            {saved ? "已保存" : "保存"}
-          </Button>
-          <Button
-            onClick={() => {
-              dispatch({ type: "tabs/select", tabId, file: undefined });
-              dispatch({ type: "tabs/video", tabId, video: undefined });
-              setPlayUrl("");
-              setTemplates([]);
-            }}
-          >
-            关闭预览
-          </Button>
-        </Space>
         {noMaterial ? <Alert type="warning" message="请先在左侧边栏配置素材文件夹后再保存" /> : null}
       </Space>
-    </Card>
+    </VideoPlayerModal>
   );
 }
