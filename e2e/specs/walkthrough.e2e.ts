@@ -451,10 +451,7 @@ test("d2. 播即存：完整模式按播放自动触发下载（不等完成）"
     undefined,
     { timeout: 60_000, polling: 1000 },
   );
-  // “已开始下载”提示出现（antd v6 notice 选择器），且主进程开始吐进度
-  await expect(win.locator(".ant-message-notice", { hasText: "已开始下载" }).first()).toBeVisible({
-    timeout: 120_000,
-  });
+  // 自动下载静默无 toast：以主进程开始吐进度为准（且 fileId 对得上）
   await win.waitForFunction(
     () => (window as unknown as { __prog?: unknown }).__prog !== null,
     undefined,
@@ -477,7 +474,7 @@ test("e. 去重记账：同一文件状态为 saved", async () => {
   });
   const st = statuses.find((s) => s.file_id === ctx.savedFileId);
   expect(st?.state).toBe("saved");
-  // UI 角标同步出现“已保存”（FolderView 在 progressClear 后重查状态）
-  await expect(win.getByText("已保存").first()).toBeVisible({ timeout: 60_000 });
+  // UI 角标同步出现左上角绿勾（FolderView 在 progressClear 后重查状态）
+  await expect(win.locator('[data-testid="saved-mark"]').first()).toBeVisible({ timeout: 60_000 });
   await win.screenshot({ path: join(SHOTS, "05-dedup.png") });
 });

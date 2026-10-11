@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
 import { join } from "node:path";
 
 import type { SavedShare as IpcSavedShare } from "../shared/contract.js";
@@ -9,6 +9,12 @@ import {
   pick_preview_url,
   video_preview,
 } from "./share-api.js";
+import {
+  clearShareThumbnails,
+  localThumbnail,
+  pruneCache,
+  warmThumbnails,
+} from "./thumbnail-cache.js";
 import {
   addShare,
   getConfig,
@@ -42,7 +48,7 @@ function errMsg(e: unknown): string {
 }
 
 /**
- * 注册全部 14 个 `ipcMain.handle`（channel/入参/返回见 `electron/shared/contract.ts`）。
+ * 注册全部 16 个 `ipcMain.handle`（channel/入参/返回见 `electron/shared/contract.ts`）。
  * 只调用一次（重复注册会抛）；窗口引用经 `getWin()` 懒取。
  */
 function registerIpcHandlers(userDataDir: string): void {
@@ -73,6 +79,8 @@ function registerIpcHandlers(userDataDir: string): void {
   ipcMain.handle("remove_share", async (_e, args: { shareId: string }) => {
     try {
       await removeShare(userDataDir, args.shareId);
+      // 分享删除即清其缩略图缓存（best-effort，不影响删除结果）
+      await clearShareThumbnails(userDataDir, args.shareId);
     } catch (e) {
       throw new Error(errMsg(e));
     }
@@ -215,6 +223,30 @@ function registerIpcHandlers(userDataDir: string): void {
       }
     },
   );
+
+  ipcMain.handle(
+    "thumbnail_warm",
+    async (_e, args: { shareId: string; files: { fileId: string; url: string }[] }) => {
+      try {
+        // Electron net 栈抓取（走系统代理），失败项跳过不抛
+        const cached = await warmThumbnails(userDataDir, args.shareId, args.files, (url) =>
+          net.fetch(url),
+        );
+        return { cached };
+      } catch (e) {
+        throw new Error(errMsg(e));
+      }
+    },
+  );
+
+  ipcMain.handle("thumbnail_local", async (_e, args: { shareId: string; fileId: string }) => {
+    try {
+      const url = await localThumbnail(userDataDir, args.shareId, args.fileId);
+      return url === null ? null : { url };
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
 }
 
 /** 创建主窗口：1440×900，最小 1000×650。 */
@@ -240,11 +272,29 @@ function createWindow(): void {
   }
 }
 
+/**
+ * 本地媒体协议：已保存文件直接播本地落盘 mp4，不走远端。
+ * `media://file/<encodeURI 绝对路径>` → 本地文件流（range 由 net.fetch 透传，支持拖动）。
+ * 注册须在 app ready 之前。
+ */
+protocol.registerSchemesAsPrivileged([
+  { scheme: "media", privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true } },
+]);
+
 void app.whenReady().then(() => {
   const userDataDir = app.getPath("userData");
+  protocol.handle("media", (req) => {
+    const prefix = "media://file";
+    if (!req.url.startsWith(prefix)) {
+      return new Response("bad media url", { status: 400 });
+    }
+    return net.fetch(`file://${req.url.slice(prefix.length)}`);
+  });
   // store 的 isDownloading 判别由 downloader 提供（store 永不 import downloader，无环）。
   setIsDownloadingProvider(isDownloading);
   registerIpcHandlers(userDataDir);
+  // 启动时清一次过期缩略图缓存（best-effort，不阻塞建窗）
+  void pruneCache(userDataDir).catch(() => undefined);
   createWindow();
 
   app.on("activate", () => {

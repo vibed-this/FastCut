@@ -5,7 +5,7 @@ import { DownloadOutlined } from "@ant-design/icons";
 import Player from "xgplayer";
 import HlsPlugin from "xgplayer-hls";
 import "xgplayer/dist/index.min.css";
-import { downloadVideo, getStatusBatch, onDownloadDone, onDownloadProgress, videoPreview } from "../api";
+import { downloadVideo, getStatusBatch, videoPreview } from "../api";
 import type { VideoPreview } from "../api";
 import { useStore } from "../store";
 import VideoPlayerModal from "./VideoPlayerModal";
@@ -33,6 +33,22 @@ export const playerControl: { toggle: (() => void) | null } = { toggle: null };
  * 反之亦然；手动点保存不受此限制）。
  */
 const autoSaveFiredKeys = new Set<string>();
+
+/**
+ * 自动下载触发的 file_id 集合：下载完成/开始 toast 对自动路径静默（手动点保存仍提示）。
+ * FolderView 的 download-done 订阅经此判定；done 后删除。
+ */
+export const autoDownloadSilentIds = new Set<string>();
+
+/**
+ * 账本绝对路径 → 本地媒体协议 URL（主进程 media://file/ 直出文件流，支持拖动）。
+ *
+ * @param absPath - 本地绝对路径
+ * @returns media:// URL
+ */
+function toLocalMediaUrl(absPath: string): string {
+  return `media://file${encodeURI(absPath)}`;
+}
 
 /**
  * 本地选档：总是取宽度最大的可用档（finished 且有 preview_url），无画质选择。
@@ -69,6 +85,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const [playUrl, setPlayUrl] = useState("");
   /** 当前播放档的 template_id（最高档，下载时透传记账）。 */
   const [playTemplate, setPlayTemplate] = useState("");
+  /** 本地播放地址（已保存时播本地落盘文件，为空则播远端 playUrl）。 */
+  const [localUrl, setLocalUrl] = useState("");
   const [loading, setLoading] = useState(false);
   /** 视频宽高比（w/h）：loadedmetadata 后回填，Modal 按比例定窗消黑边。 */
   const [videoRatio, setVideoRatio] = useState<number | null>(null);
@@ -80,100 +98,47 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
   const file = mode === "open" ? tab?.opened_file : tab?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
 
-  // 下载进度事件订阅（仅完整模式：下载入口只在那里，避免双实例重复 toast）。
-  useEffect(() => {
-    if (mode !== "open") {
-      return;
-    }
-    let offProgress: (() => void) | null = null;
-    let offDone: (() => void) | null = null;
-    let cancelled = false;
-    void onDownloadProgress((p) => {
-      dispatch({
-        type: "tabs/progress",
-        tabId,
-        file_id: p.file_id,
-        progress: { done: p.done, total: p.total },
-      });
-    }).then((off) => {
-      if (cancelled) {
-        off();
-      } else {
-        offProgress = off;
-      }
-    });
-    void onDownloadDone((d) => {
-      dispatch({ type: "tabs/progressClear", tabId, file_id: d.file_id });
-      if (!d.ok) {
-        void message.error(d.error ?? "下载失败");
-      } else {
-        void message.success("下载完成");
-      }
-    }).then((off) => {
-      if (cancelled) {
-        off();
-      } else {
-        offDone = off;
-      }
-    });
-    return () => {
-      cancelled = true;
-      offProgress?.();
-      offDone?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabId, mode]);
-
-  // done 后刷新该 tab 状态：progress 清空即重查选中文件状态
-  useEffect(() => {
-    if (tab === undefined || file === undefined || saving) {
-      return;
-    }
-    const prog = tab.progress?.[file.file_id];
-    if (prog !== undefined) {
-      return;
-    }
-    // 仅在已触发过保存后由事件驱动刷新，此处不主动轮询
-  });
+  // 下载进度/完成订阅搬到 FolderView（每 tab 一份，避免 open/preview 双实例重复 toast；
+  // 且预览触发的下载也能推进度、刷磁贴状态）。
 
   /** 取链序号：StrictMode double-invoke 时只让最后一轮落地，避免多实例抢容器。 */
   const fetchSeqRef = useRef(0);
+  /** 本地播放失败后是否已回退过远端（防循环）。 */
+  const localFallbackDoneRef = useRef(false);
   /** handleSave 最新闭包（player effect 定义在前，事件触发时经此调用，避免过期 state）。 */
-  const handleSaveRef = useRef<() => Promise<void>>(async () => undefined);
+  const handleSaveRef = useRef<(auto: boolean) => Promise<void>>(async () => undefined);
 
-  /** 拉取可用档与播放地址（单次 preview，本地选档，避免重复打接口）。 */
+  /**
+   * 拉取播放源：已保存播本地落盘文件（media://），否则单次 preview 取最高档远端。
+   * 本地文件被挪走/删除时由播放器 error 回退远端。
+   */
   async function fetchPreview(): Promise<void> {
     if (tab === undefined || file === undefined) {
       return;
     }
     const seq = fetchSeqRef.current + 1;
     fetchSeqRef.current = seq;
-    // 新文件重取链：丢弃上一轮窗口比例。
+    // 新文件重取链：丢弃上一轮窗口比例与本地地址。
     setVideoRatio(null);
+    setLocalUrl("");
+    localFallbackDoneRef.current = false;
     setLoading(true);
     setExpired(false);
     setExpiredMsg("");
     try {
-      const list = await videoPreview(tab.share_id, file.drive_id, file.file_id);
-      if (fetchSeqRef.current !== seq) {
-        return;
-      }
-      const picked = pickUsableTemplate(list);
-      if (picked === undefined || !picked.preview_url) {
-        throw new Error("没有可用的预览档");
-      }
-      setPlayUrl(picked.preview_url);
-      setPlayTemplate(picked.template_id);
-      dispatch({
-        type: "tabs/video",
-        tabId,
-        video: { url: picked.preview_url, template: picked.template_id },
-      });
       const statuses = await getStatusBatch(tab.share_id, [file.file_id]);
       if (fetchSeqRef.current !== seq) {
         return;
       }
-      setSaved(statuses.some((s) => s.file_id === file.file_id && s.state === "saved"));
+      const savedEntry = statuses.find((s) => s.file_id === file.file_id && s.state === "saved");
+      if (savedEntry?.path !== undefined && savedEntry.path !== "") {
+        setSaved(true);
+        setLocalUrl(toLocalMediaUrl(savedEntry.path));
+        setLoading(false);
+        return;
+      }
+      setSaved(false);
+      await fetchRemote(seq);
     } catch (e) {
       if (fetchSeqRef.current !== seq) {
         return;
@@ -188,30 +153,55 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     }
   }
 
+  /** 单次 preview 取最高档远端（本地选档，避免重复打接口）。 */
+  async function fetchRemote(seq: number): Promise<void> {
+    if (tab === undefined || file === undefined) {
+      return;
+    }
+    const list = await videoPreview(tab.share_id, file.drive_id, file.file_id);
+    if (fetchSeqRef.current !== seq) {
+      return;
+    }
+    const picked = pickUsableTemplate(list);
+    if (picked === undefined || !picked.preview_url) {
+      throw new Error("没有可用的预览档");
+    }
+    setPlayUrl(picked.preview_url);
+    setPlayTemplate(picked.template_id);
+    dispatch({
+      type: "tabs/video",
+      tabId,
+      video: { url: picked.preview_url, template: picked.template_id },
+    });
+  }
+
   useEffect(() => {
     void fetchPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
 
-  // xgplayer 接入：playUrl 就绪且不在 loading 期时创建实例（loading 结束容器才稳定挂载）。
+  // xgplayer 接入：播放源就绪且不在 loading 期时创建实例（loading 结束容器才稳定挂载）。
+  // 已保存播本地 mp4（无 Hls 插件、无跨域属性）；否则播远端 m3u8。
   // 无清晰度插件：永远播最高档，不提供切换。
   // 空格由 App 层全局接管：此处以 ignores 关掉 xgplayer keyboard 插件，避免双重响应；
   // 完整模式注册 playerControl.toggle 供空格开关，预览模式不注册（空格只关闭）。
   useEffect(() => {
     const container = containerRef.current;
-    if (container === null || loading || playUrl === "") {
+    const src = localUrl !== "" ? localUrl : playUrl;
+    if (container === null || loading || src === "") {
       return;
     }
+    const isLocal = localUrl !== "";
     const player = new Player({
       el: container,
-      url: playUrl,
-      plugins: [HlsPlugin],
+      url: src,
+      plugins: isLocal ? [] : [HlsPlugin],
       ignores: ["keyboard"],
       playbackRate: [0.5, 1, 1.5, 2],
       width: "100%",
       height: "100%",
       autoplay: mode === "preview",
-      videoAttributes: { preload: "metadata", crossorigin: "anonymous" },
+      videoAttributes: isLocal ? { preload: "metadata" } : { preload: "metadata", crossorigin: "anonymous" },
     });
     playerRef.current = player;
     if (mode === "open") {
@@ -224,13 +214,14 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       };
     }
     // 播即存（open 与 preview 均触发：第一次 play 自动走一次保存，等价于自动点下载按钮）；
-    // handleSave 内部已有已存短路 + 主进程重入 guard，跨实例重复由 autoSaveFiredKeys 拦。
+    // 自动路径无开始/完成 toast；handleSave 内部已有已存短路 + 主进程重入 guard，
+    // 跨实例重复由 autoSaveFiredKeys 拦。
     player.on("play", () => {
       if (autoSaveFiredKeys.has(fileKey)) {
         return;
       }
       autoSaveFiredKeys.add(fileKey);
-      void handleSaveRef.current();
+      void handleSaveRef.current(true);
     });
     // 首帧元数据就绪即回填宽高比，Modal 按比例定窗（竖视频竖窗，无黑边）。
     const innerVideo = container.querySelector("video");
@@ -246,6 +237,25 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       innerVideo?.addEventListener("loadedmetadata", readRatio, { once: true });
     }
     player.on("error", (err: unknown) => {
+      // 本地文件被挪走/删除：回退远端播一次（仅一次，防循环）。
+      if (isLocal && !localFallbackDoneRef.current) {
+        localFallbackDoneRef.current = true;
+        setLocalUrl("");
+        const seq = fetchSeqRef.current + 1;
+        fetchSeqRef.current = seq;
+        setLoading(true);
+        void fetchRemote(seq)
+          .catch((e: unknown) => {
+            setExpired(true);
+            setExpiredMsg(e instanceof Error ? e.message : String(e));
+          })
+          .finally(() => {
+            if (fetchSeqRef.current === seq) {
+              setLoading(false);
+            }
+          });
+        return;
+      }
       setExpired(true);
       const detail = err instanceof Error ? err.message : String(err ?? "");
       setExpiredMsg(detail === "" ? "播放失败，点“重取链接”重试" : `播放失败（${detail}），点“重取链接”重试`);
@@ -269,20 +279,16 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       playerRef.current = null;
       player.destroy();
     };
-  }, [playUrl, loading, mode, fileKey]);
+  }, [playUrl, localUrl, loading, mode, fileKey]);
 
   if (tab === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择视频文件预览</Typography.Text>;
   }
 
-  /** 保存当前视频。 */
+  /** 保存当前视频（auto=true 为播即存自动触发：不展示开始/完成/已存 toast，失败仍提示）。 */
   const curTab = tab;
   const curFile = file;
-  async function handleSave(): Promise<void> {
-    if (playUrl === "") {
-      void message.warning("播放地址尚未就绪，请稍后重试");
-      return;
-    }
+  async function handleSave(auto = false): Promise<void> {
     if (state.materialDir === "") {
       void message.warning("请先在左侧边栏配置素材文件夹");
       return;
@@ -292,7 +298,13 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       const statuses = await getStatusBatch(curTab.share_id, [curFile.file_id]);
       if (statuses.some((s) => s.file_id === curFile.file_id && s.state === "saved")) {
         setSaved(true);
-        void message.info("该文件已保存");
+        if (!auto) {
+          void message.info("该文件已保存");
+        }
+        return;
+      }
+      if (playUrl === "") {
+        void message.warning("播放地址尚未就绪，请稍后重试");
         return;
       }
       // sub_dir 为 stack 路径名 join（根目录除外）
@@ -301,9 +313,13 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
         .map((s) => s.name)
         .filter((n) => n !== "");
       const subDir = dirs.join("/");
+      autoDownloadSilentIds.add(curFile.file_id);
       await downloadVideo(playUrl, curTab.share_id, curFile.file_id, curFile.name, playTemplate, subDir);
-      void message.success("已开始下载");
+      if (!auto) {
+        void message.success("已开始下载");
+      }
     } catch (e) {
+      autoDownloadSilentIds.delete(curFile.file_id);
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
@@ -319,6 +335,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
     dispatch({ type: "tabs/video", tabId, video: undefined });
     setPlayUrl("");
     setPlayTemplate("");
+    setLocalUrl("");
     setVideoRatio(null);
     setExpired(false);
     setExpiredMsg("");

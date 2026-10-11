@@ -213,6 +213,24 @@ export function getStatus(share_id: string, file_id: string): Promise<FileStatus
   return invoke("get_status", { shareId: share_id, fileId: file_id });
 }
 
+/**
+ * 缩略图预取：把一批 fileId+远程 URL 交给 main，缺失才下载；
+ * 返回命中的 fileId → 本地媒体 URL（失败项直接缺席，调用方回退远程 URL）。
+ */
+export function warmThumbnails(
+  share_id: string,
+  files: { fileId: string; url: string }[],
+): Promise<Record<string, string>> {
+  return invoke("thumbnail_warm", { shareId: share_id, files }).then((r) => r.cached);
+}
+
+/** 查单个缩略图本地缓存：命中返回媒体 URL，否则 null。 */
+export function getLocalThumbnail(share_id: string, file_id: string): Promise<string | null> {
+  return invoke("thumbnail_local", { shareId: share_id, fileId: file_id }).then(
+    (r) => (r === null ? null : r.url),
+  );
+}
+
 // ---- 事件订阅（主契约：返回 Promise<UnlistenFn>）----
 
 export function onDownloadProgress(

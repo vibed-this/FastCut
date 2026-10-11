@@ -96,12 +96,37 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
     };
   }, [open, onClose]);
 
-  if (!open) {
+  // 进出场动画：open 关闭后延迟卸载，播完退出动画再返回 null。
+  const [render, setRender] = useState(open);
+  const [leaving, setLeaving] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setRender(true);
+      setLeaving(false);
+      return;
+    }
+    setLeaving(true);
+    const timer = window.setTimeout(() => {
+      setRender(false);
+    }, 160);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [open]);
+
+  if (!render) {
     return null;
   }
 
   // 无 footer：下载收进标题栏 actions，底部不再留条。
   return (
+    <>
+      <style>
+        {`@keyframes fc-modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fc-modal-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes fc-modal-zoom-in { from { opacity: 0; transform: scale(0.92) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes fc-modal-zoom-out { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.95); } }`}
+      </style>
     <div
       data-testid="video-player-modal"
       role="dialog"
@@ -122,6 +147,8 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         alignItems: "center",
         justifyContent: "center",
         padding: 24,
+        pointerEvents: leaving ? "none" : "auto",
+        animation: leaving ? "fc-modal-fade-out 0.16s ease-in forwards" : "fc-modal-fade-in 0.16s ease-out",
       }}
     >
       <div
@@ -136,6 +163,9 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
           display: "flex",
           flexDirection: "column",
           boxShadow: "0 18px 70px rgba(0, 0, 0, 0.65)",
+          animation: leaving
+            ? "fc-modal-zoom-out 0.16s ease-in forwards"
+            : "fc-modal-zoom-in 0.2s cubic-bezier(0.2, 0.9, 0.25, 1.2)",
         }}
       >
         {chrome ? (
@@ -191,5 +221,6 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         </div>
       </div>
     </div>
+    </>
   );
 }

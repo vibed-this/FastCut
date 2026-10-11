@@ -6,7 +6,7 @@
  * - invoke 顶层参数名沿用 camelCase（如 shareId / fileIds / m3u8Url）；
  * - 嵌套结构体与后端字段保持 snake_case（如 share_id / target_dir）。
  *
- * Channel 名与旧 Tauri 命令名一一对应，共 14 个；事件 2 个。
+ * Channel 名与旧 Tauri 命令名一一对应（14 个）+ 缩略图缓存 2 个；事件 2 个。
  * Wave 3 在 main 侧按此表注册 `ipcMain.handle`，preload 原样透出。
  */
 
@@ -139,7 +139,9 @@ export type IpcChannel =
   | "video_preview"
   | "pick_preview_url"
   | "get_share_meta"
-  | "download_video";
+  | "download_video"
+  | "thumbnail_warm"
+  | "thumbnail_local";
 
 /** 各 channel 的 invoke 入参（顶层 camelCase）。 */
 export interface IpcParams {
@@ -176,6 +178,10 @@ export interface IpcParams {
     template: string;
     subDir: string;
   };
+  /** 缩略图预取：缺失项后台下载，返回命中的 fileId → 本地媒体 URL。 */
+  thumbnail_warm: { shareId: string; files: { fileId: string; url: string }[] };
+  /** 查单个缩略图本地缓存：命中返回媒体 URL，否则 null。 */
+  thumbnail_local: { shareId: string; fileId: string };
 }
 
 /** 各 channel 的 invoke 返回（rename_share 以旧 Rust `Result<SavedShare>` 为准，返回更新后的分享）。 */
@@ -194,6 +200,8 @@ export interface IpcResult {
   pick_preview_url: PickPreviewResult;
   get_share_meta: ShareMeta;
   download_video: string;
+  thumbnail_warm: { cached: Record<string, string> };
+  thumbnail_local: { url: string } | null;
 }
 
 // ---- 事件名（2 个） ----

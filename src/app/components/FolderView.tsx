@@ -1,11 +1,11 @@
-/** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，禁止逐项调 preview）。 */
+/** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，命中本地磁盘缓存秒显，禁止逐项调 preview）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Badge, Breadcrumb, Button, Space, Spin, Typography } from "antd";
-import { FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
-import { getStatusBatch, listShare } from "../api";
+import { CheckCircleFilled, FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
+import { getStatusBatch, listShare, onDownloadDone, onDownloadProgress, warmThumbnails } from "../api";
 import type { FileStatus, ShareItem } from "../api";
 import { useStore } from "../store";
-import VideoPane from "./VideoPane";
+import VideoPane, { autoDownloadSilentIds } from "./VideoPane";
 
 /** 文件夹视图属性。 */
 export interface FolderViewProps {
@@ -64,6 +64,7 @@ function ThumbImage(props: { src: string; name: string; video: boolean }): React
     );
   }
   return (
+    // 1:1 正方形容器，图片 contain 完整显示（原始比例，黑边填充不裁切）。
     <div style={{ position: "relative", width: "100%", height: "100%", background: "#000" }}>
       {!loaded ? (
         <div
@@ -120,6 +121,23 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextMarker, setNextMarker] = useState<string | null>(null);
   const [statusMap, setStatusMap] = useState<Record<string, FileStatus>>({});
+  /** 缩略图本地缓存：fileId → media:// 本地 URL；命中即秒显，不阻塞远程首绘。 */
+  const [thumbLocalMap, setThumbLocalMap] = useState<Record<string, string>>({});
+
+  /** 后台预取一批缩略图（fire-and-forget：失败回退远程 URL，不弹错）。 */
+  function warmBatch(shareId: string, batch: ShareItem[]): void {
+    const entries = batch
+      .filter((i) => i.thumbnail !== undefined && i.thumbnail !== "")
+      .map((i) => ({ fileId: i.file_id, url: i.thumbnail as string }));
+    if (entries.length === 0) {
+      return;
+    }
+    warmThumbnails(shareId, entries)
+      .then((cached) => {
+        setThumbLocalMap((prev) => ({ ...prev, ...cached }));
+      })
+      .catch(() => undefined);
+  }
 
   /** 把一批条目的状态并入映射（只查新增 id）。 */
   async function mergeStatuses(shareId: string, batch: ShareItem[]): Promise<void> {
@@ -165,6 +183,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
       setStatusMap({});
       await mergeStatuses(tab.share_id, res.items);
+      warmBatch(tab.share_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -188,6 +207,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       setItems((prev) => [...prev, ...res.items]);
       setNextMarker(res.next_marker === "" ? null : res.next_marker);
       await mergeStatuses(tab.share_id, res.items);
+      warmBatch(tab.share_id, res.items);
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -235,6 +255,50 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     // 挂载与 stack 变化时刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabId, stackKey]);
+
+  // 下载进度/完成订阅（每 tab 一份：open/预览触发的下载都推进度；
+  // 自动下载的完成 toast 静默，手动保存仍提示；progress 变化驱动下方状态重查，磁贴绿勾自动出现）。
+  useEffect(() => {
+    let offProgress: (() => void) | null = null;
+    let offDone: (() => void) | null = null;
+    let cancelled = false;
+    void onDownloadProgress((p) => {
+      dispatch({
+        type: "tabs/progress",
+        tabId,
+        file_id: p.file_id,
+        progress: { done: p.done, total: p.total },
+      });
+    }).then((off) => {
+      if (cancelled) {
+        off();
+      } else {
+        offProgress = off;
+      }
+    });
+    void onDownloadDone((d) => {
+      dispatch({ type: "tabs/progressClear", tabId, file_id: d.file_id });
+      const silent = autoDownloadSilentIds.has(d.file_id);
+      autoDownloadSilentIds.delete(d.file_id);
+      if (!d.ok) {
+        void message.error(d.error ?? "下载失败");
+      } else if (!silent) {
+        void message.success("下载完成");
+      }
+    }).then((off) => {
+      if (cancelled) {
+        off();
+      } else {
+        offDone = off;
+      }
+    });
+    return () => {
+      cancelled = true;
+      offProgress?.();
+      offDone?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId]);
 
   // 下载进度变化后刷新该 tab 状态（含完成清空后终查一次，落"已保存"角标）；
   // 用 ref 跳过挂载首跑（load 已查过），key 未变（纯 done/total 推进）不重查。
@@ -305,7 +369,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     [items],
   );
 
-  /** 状态角标：已保存 / 下载中。 */
+  /** 状态角标：下载中（底部文字）；已保存改走封面左上角绿色圆勾，不占底部行。 */
   function statusBadge(item: ShareItem): React.JSX.Element | null {
     const st = statusMap[item.file_id];
     const prog = currentTab.progress?.[item.file_id];
@@ -313,11 +377,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
       return <Badge status="processing" text={`下载中 ${pct}%`} />;
     }
-    if (st === undefined || st.state === "none") {
+    if (st === undefined || st.state === "none" || st.state === "saved") {
       return null;
-    }
-    if (st.state === "saved") {
-      return <Badge status="success" text="已保存" />;
     }
     return <Badge status="processing" text="下载中" />;
   }
@@ -327,10 +388,29 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     const isFolder = item.type === "folder";
     const previewable = isFolder || isVideoFile(item);
     const selected = currentTab.selected_file?.file_id === item.file_id;
+    const st = statusMap[item.file_id];
+    const savedMark =
+      !isFolder && st?.state === "saved" && currentTab.progress?.[item.file_id] === undefined ? (
+        <span
+          data-testid="saved-mark"
+          title="已保存"
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            zIndex: 1,
+            lineHeight: 0,
+            filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.5))",
+          }}
+        >
+          <CheckCircleFilled style={{ fontSize: 20, color: "#52c41a" }} />
+        </span>
+      ) : null;
     const cover = isFolder ? (
       <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
     ) : item.thumbnail !== undefined && item.thumbnail !== "" ? (
-      <ThumbImage src={item.thumbnail} name={item.name} video={isVideoFile(item)} />
+      // 本地缓存命中秒显（media://），未命中先绘远程 URL，后台下完自动切换
+      <ThumbImage src={thumbLocalMap[item.file_id] ?? item.thumbnail} name={item.name} video={isVideoFile(item)} />
     ) : isVideoFile(item) ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
     ) : (
@@ -377,13 +457,17 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       >
         <div
           style={{
-            height: 64,
+            position: "relative",
+            width: "100%",
+            aspectRatio: "1 / 1",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             overflow: "hidden",
+            borderRadius: 6,
           }}
         >
+          {savedMark}
           {cover}
         </div>
         <Typography.Paragraph
