@@ -1,11 +1,26 @@
 /** 文件夹浏览：面包屑 + 缩略图网格（缩略图用 list_by_share 自带 thumbnail，命中本地磁盘缓存秒显，禁止逐项调 preview）。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntdApp, Breadcrumb, Button, Space, Spin, Typography } from "antd";
-import { CheckCircleFilled, FileOutlined, FolderFilled, VideoCameraOutlined } from "@ant-design/icons";
-import { getStatusBatch, listShare, onDownloadDone, onDownloadProgress, warmThumbnails } from "../api";
+import {
+  CheckCircleFilled,
+  DownloadOutlined,
+  FileOutlined,
+  FolderFilled,
+  LoadingOutlined,
+  VideoCameraOutlined,
+} from "@ant-design/icons";
+import {
+  downloadVideo,
+  getStatusBatch,
+  listShare,
+  onDownloadDone,
+  onDownloadProgress,
+  videoPreview,
+  warmThumbnails,
+} from "../api";
 import type { FileStatus, ShareItem } from "../api";
 import { useStore } from "../store";
-import VideoPane, { autoDownloadSilentIds } from "./VideoPane";
+import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
 
 /** 文件夹视图属性。 */
 export interface FolderViewProps {
@@ -123,6 +138,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [statusMap, setStatusMap] = useState<Record<string, FileStatus>>({});
   /** 缩略图本地缓存：fileId → media:// 本地 URL；命中即秒显，不阻塞远程首绘。 */
   const [thumbLocalMap, setThumbLocalMap] = useState<Record<string, string>>({});
+  /** 当前 hover 的磁贴 file_id（未保存视频 hover 时在角标位露出下载按钮）。 */
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  /** 磁贴直下取链中（preview 未返回、progress 事件未到前的空窗期即转圈、防连点）。 */
+  const [tilePendingMap, setTilePendingMap] = useState<Record<string, boolean>>({});
 
   /** 后台预取一批缩略图（fire-and-forget：失败回退远程 URL，不弹错）。 */
   function warmBatch(shareId: string, batch: ShareItem[]): void {
@@ -357,6 +376,69 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     dispatch({ type: "explorer/openFile", file: item });
   }
 
+  /**
+   * 磁贴直下：不开播放器直接下载（hover 下载按钮用）。
+   * 与 VideoPane.handleSave 同策略（最高档 + stack 子目录），但走手动路径：
+   * 有开始/完成 toast，不进自动静默集合。取链空窗期用 tilePending 转圈。
+   */
+  async function handleTileDownload(item: ShareItem): Promise<void> {
+    if (item.type === "folder" || !isVideoFile(item)) {
+      return;
+    }
+    if (state.materialDir === "" || state.materialDir === null) {
+      void message.warning("请先在左侧边栏配置素材文件夹");
+      return;
+    }
+    if (
+      tilePendingMap[item.file_id] === true ||
+      currentExplorer.progress?.[item.file_id] !== undefined
+    ) {
+      return;
+    }
+    setTilePendingMap((prev) => ({ ...prev, [item.file_id]: true }));
+    try {
+      const statuses = await getStatusBatch(currentExplorer.share_id, [item.file_id]);
+      if (statuses.some((s) => s.file_id === item.file_id && s.state === "saved")) {
+        setStatusMap((prev) => {
+          const map = { ...prev };
+          for (const s of statuses) {
+            map[s.file_id] = s;
+          }
+          return map;
+        });
+        void message.info("该文件已保存");
+        return;
+      }
+      const list = await videoPreview(currentExplorer.share_id, item.drive_id, item.file_id);
+      const picked = pickUsableTemplate(list);
+      if (picked === undefined || picked.preview_url === undefined || picked.preview_url === "") {
+        throw new Error("没有可用的预览档");
+      }
+      // sub_dir 为 stack 路径名 join（根目录除外），与 VideoPane 保存路径一致。
+      const dirs = currentExplorer.stack
+        .slice(1)
+        .map((s) => s.name)
+        .filter((n) => n !== "");
+      await downloadVideo(
+        picked.preview_url,
+        currentExplorer.share_id,
+        item.file_id,
+        item.name,
+        picked.template_id,
+        dirs.join("/"),
+      );
+      void message.success("已开始下载");
+    } catch (e) {
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTilePendingMap((prev) => {
+        const map = { ...prev };
+        delete map[item.file_id];
+        return map;
+      });
+    }
+  }
+
   /** 文件夹排前面，其余保持接口返回顺序（资源管理器式）。 */
   const sortedItems = useMemo(
     () =>
@@ -371,51 +453,126 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   /** 单个缩略图磁贴（图片/视频均用服务端 thumbnail 快照，无则回退图标）。 */
   function renderTile(item: ShareItem): React.JSX.Element {
     const isFolder = item.type === "folder";
-    const previewable = isFolder || isVideoFile(item);
+    const isVideo = isVideoFile(item);
+    const previewable = isFolder || isVideo;
     const selected = currentExplorer.selected_file?.file_id === item.file_id;
     const st = statusMap[item.file_id];
-    const savedMark =
-      !isFolder && st?.state === "saved" && currentExplorer.progress?.[item.file_id] === undefined ? (
-        <span
-          data-testid="saved-mark"
-          title="已保存"
-          style={{
-            position: "absolute",
-            top: 6,
-            left: 6,
-            zIndex: 1,
-            lineHeight: 0,
-            filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.5))",
-          }}
-        >
-          <CheckCircleFilled style={{ fontSize: 20, color: "#52c41a" }} />
-        </span>
-      ) : null;
+    const downloading =
+      !isFolder &&
+      (currentExplorer.progress?.[item.file_id] !== undefined ||
+        st?.state === "downloading" ||
+        tilePendingMap[item.file_id] === true);
+    /** 已保存落盘路径（拖出的真实文件）；下载中/未保存时为 undefined。 */
+    const savedPath =
+      !isFolder && !downloading && st?.state === "saved" && st.path !== undefined && st.path !== ""
+        ? st.path
+        : undefined;
+    const hovered = hoveredId === item.file_id;
+    // 左上角标三态（同坑位互斥）：下载中 loading / 已保存绿勾（可拖）/ hover 未保存下载按钮。
+    const cornerMark = downloading ? (
+      <span
+        data-testid="tile-downloading"
+        title="下载中…"
+        style={{
+          position: "absolute",
+          top: 6,
+          left: 6,
+          zIndex: 1,
+          width: 24,
+          height: 24,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#fff",
+          borderRadius: "50%",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+        }}
+      >
+        <LoadingOutlined style={{ fontSize: 14, color: "#1677ff" }} spin />
+      </span>
+    ) : savedPath !== undefined ? (
+      <span
+        data-testid="saved-mark"
+        title="已保存，可拖到剪辑软件时间线"
+        style={{
+          position: "absolute",
+          top: 6,
+          left: 6,
+          zIndex: 1,
+          lineHeight: 0,
+          filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.5))",
+        }}
+      >
+        <CheckCircleFilled style={{ fontSize: 20, color: "#52c41a" }} />
+      </span>
+    ) : !isFolder && isVideo && hovered ? (
+      <button
+        data-testid="tile-download"
+        title="下载到素材库"
+        aria-label={`下载${item.name}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleTileDownload(item);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+        }}
+        style={{
+          position: "absolute",
+          top: 6,
+          left: 6,
+          zIndex: 1,
+          width: 24,
+          height: 24,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#fff",
+          border: "1px solid #1677ff",
+          borderRadius: "50%",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+          cursor: "pointer",
+          padding: 0,
+        }}
+      >
+        <DownloadOutlined style={{ fontSize: 14, color: "#1677ff" }} />
+      </button>
+    ) : null;
     const cover = isFolder ? (
       <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
     ) : item.thumbnail !== undefined && item.thumbnail !== "" ? (
       // 本地缓存命中秒显（media://），未命中先绘远程 URL，后台下完自动切换
-      <ThumbImage src={thumbLocalMap[item.file_id] ?? item.thumbnail} name={item.name} video={isVideoFile(item)} />
-    ) : isVideoFile(item) ? (
+      <ThumbImage src={thumbLocalMap[item.file_id] ?? item.thumbnail} name={item.name} video={isVideo} />
+    ) : isVideo ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
     ) : (
       <FileOutlined style={{ fontSize: 52, color: "#999" }} />
     );
+    const draggable = savedPath !== undefined;
     return (
       <div
         data-testid={isFolder ? "enter-folder" : "preview-file"}
-        title={previewable ? undefined : "暂不支持预览"}
+        title={draggable ? "已保存，可拖到剪辑软件时间线" : previewable ? undefined : "暂不支持预览"}
+        draggable={draggable}
+        onDragStart={(e) => {
+          // Electron 原生拖出：交 main startDrag，OS 侧等价于从 Finder 拖出真实文件。
+          if (savedPath === undefined) {
+            return;
+          }
+          e.preventDefault();
+          window.fastcut?.startFileDrag(savedPath);
+        }}
         onClick={() => {
           if (isFolder) {
             enterFolder(item);
-          } else if (isVideoFile(item)) {
+          } else if (isVideo) {
             selectFile(item);
           }
         }}
         onDoubleClick={() => {
           if (isFolder) {
             enterFolder(item);
-          } else if (isVideoFile(item)) {
+          } else if (isVideo) {
             openFile(item);
           }
         }}
@@ -425,16 +582,18 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           borderRadius: 8,
           border: selected ? "1px solid #1677ff" : "1px solid transparent",
           background: selected ? "#e6f4ff" : undefined,
-          cursor: previewable ? "pointer" : "default",
+          cursor: draggable ? "grab" : previewable ? "pointer" : "default",
           opacity: previewable ? 1 : 0.55,
           textAlign: "center",
         }}
         onMouseEnter={(e) => {
+          setHoveredId(item.file_id);
           if (previewable && !selected) {
             e.currentTarget.style.background = "#f5f5f5";
           }
         }}
         onMouseLeave={(e) => {
+          setHoveredId((prev) => (prev === item.file_id ? null : prev));
           if (!selected) {
             e.currentTarget.style.background = "";
           }
@@ -452,7 +611,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
             borderRadius: 6,
           }}
         >
-          {savedMark}
+          {cornerMark}
           {cover}
         </div>
         <Typography.Paragraph

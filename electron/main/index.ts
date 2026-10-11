@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol } from "electron";
-import { join } from "node:path";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol } from "electron";
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 
 import type { SavedShare as IpcSavedShare } from "../shared/contract.js";
 import { downloadVideo, isDownloading } from "./downloader.js";
@@ -245,6 +246,34 @@ function registerIpcHandlers(userDataDir: string): void {
       return url === null ? null : { url };
     } catch (e) {
       throw new Error(errMsg(e));
+    }
+  });
+
+  /**
+   * 原生拖出：Renderer 已保存磁贴 `ondragstart`（已 `preventDefault`）后发来本地绝对路径，
+   * 此处调 `event.sender.startDrag({ file, icon })`，OS 侧等价于从 Finder/资源管理器拖出文件，
+   * 可直接丢到 NLE 时间线 / Finder / 桌面。仅接受已存在的绝对路径文件；macOS icon 不能为空，
+   * 首选该文件的系统图标，失败回退应用图标。
+   */
+  ipcMain.on("ondragstart", (event, filePath: unknown) => {
+    try {
+      // 仅接受已存在的本地绝对路径（相对路径/空串一律拒绝）。
+      if (typeof filePath !== "string" || !isAbsolute(filePath) || !existsSync(filePath)) {
+        return;
+      }
+      const abs = filePath;
+      void app
+        .getFileIcon(abs)
+        .catch(() => nativeImage.createFromPath(join(app.getAppPath(), "build", "icon.png")))
+        .then((icon) => {
+          const finalIcon = !icon.isEmpty()
+            ? icon
+            : nativeImage.createFromPath(join(app.getAppPath(), "build", "icon.png"));
+          event.sender.startDrag({ file: abs, icon: finalIcon });
+        })
+        .catch(() => undefined);
+    } catch {
+      // best-effort：拖出失败不抛回 renderer
     }
   });
 }

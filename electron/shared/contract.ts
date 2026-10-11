@@ -228,6 +228,12 @@ export interface FastcutBridge {
   onDownloadProgress(handler: (payload: DownloadProgressPayload) => void): UnlistenFn;
   /** 订阅下载完成事件。 */
   onDownloadDone(handler: (payload: DownloadDonePayload) => void): UnlistenFn;
+  /**
+   * 原生拖出：Renderer 磁贴 `ondragstart` 里 `preventDefault` 后调用，
+   * 经 `ondragstart` 消息转 main `webContents.startDrag({ file })`，
+   * OS 侧等价于从 Finder/资源管理器拖出真实文件（仅本地已保存文件可用）。
+   */
+  startFileDrag(filePath: string): void;
 }
 
 declare global {

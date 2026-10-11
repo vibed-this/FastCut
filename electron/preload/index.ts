@@ -7,6 +7,9 @@ import type {
 
 const bridge: FastcutBridge = {
   invoke: (channel, args) => ipcRenderer.invoke(channel, args),
+  startFileDrag: (filePath: string) => {
+    ipcRenderer.send("ondragstart", filePath);
+  },
   onDownloadProgress: (handler: (payload: DownloadProgressPayload) => void) => {
     const fn = (_e: unknown, payload: DownloadProgressPayload): void => {
       handler(payload);

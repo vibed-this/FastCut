@@ -50,11 +50,12 @@ function toLocalMediaUrl(absPath: string): string {
 
 /**
  * 本地选档：总是取宽度最大的可用档（finished 且有 preview_url），无画质选择。
+ * 磁贴直下复用同一策略，保证两处下到同一清晰度。
  *
  * @param templates - 预览档列表
  * @returns 选中的档，无可用时 undefined
  */
-function pickUsableTemplate(templates: VideoPreview[]): VideoPreview | undefined {
+export function pickUsableTemplate(templates: VideoPreview[]): VideoPreview | undefined {
   const usable = templates.filter(
     (t) => t.status === "finished" && typeof t.preview_url === "string" && t.preview_url.length > 0,
   );
