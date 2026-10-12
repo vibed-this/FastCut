@@ -9,7 +9,7 @@
  * - AES-256-GCM 加密参数（key=`sha256(key:seed)`，12 字节随机 nonce，
  *   密文+tag 标准 b64）得到
  *   `{version:3, k_970b03, p_970b03, r_970b03:1, i_970b03}`，
- *   内层参数含 `qualityTier: "standard"`（正常画质）；
+ *   内层参数含 `qualityTier: "hd"`（高清）；
  * - `POST /api/parse` 返回 `{status:0, encrypt:true, data, iv}`，经
  *   `XOR(0x5A) → 8 字节块反转 → 自定义 B64 表 → AES-256-CBC`
  *   （key=`sha256("12345678901234567890123456789013")`，注意不是原文 UTF-8）
@@ -32,9 +32,9 @@ export const KUKU_AUTH_ROUTE = "auth-970b03";
 export const KUKU_FIELD_SUFFIX = "970b03";
 /** 解析页路径（auth 与加密内参的 `pagePath`，与浏览器地址栏一致）。 */
 export const KUKU_PAGE_PATH = "/xiaohongshu";
-/** 默认画质档：`"standard"` = 正常画质（前端另有 `"hd"` 高清档）。 */
+/** 默认画质档：`"hd"` = 高清（前端另有 `"standard"` 正常画质）。 */
 export type XhsQualityTier = "standard" | "hd";
-export const DEFAULT_QUALITY_TIER: XhsQualityTier = "standard";
+export const DEFAULT_QUALITY_TIER: XhsQualityTier = "hd";
 /** 解析响应 key 常量（前端仍明文传递；实际 AES key 为其 SHA-256）。 */
 export const KUKU_RESPONSE_KEY = "12345678901234567890123456789013";
 /** 标准 B64 表。 */
@@ -347,7 +347,7 @@ export class XhsClient {
   /**
    * 构造 `/api/parse` 请求体：AES-256-GCM 加密参数
    *  （key=`sha256(key:seed)`，12 字节随机 nonce，密文+tag 标准 b64），
-   *   信封字段名取当前 profile 后缀；内层带 `qualityTier`（默认正常画质）。
+   *   信封字段名取当前 profile 后缀；内层带 `qualityTier`（默认高清）。
    */
   buildParseBody(
     url: string,
@@ -396,7 +396,7 @@ export class XhsClient {
 
   /**
    * 解析一条小红书链接（仅视频期）：短链先跳转 → 鉴权 → parse → 解密 →
-   * `{title, downloadUrl, cover, noteId, author}`（默认正常画质）。
+   * `{title, downloadUrl, cover, noteId, author}`（默认高清）。
    * 图集笔记（无 `url` 但有 `pics`）抛 `仅支持视频笔记，图集笔记暂不支持`；
    * 对方改版（非 200 / 字段缺失）把上游原文截 200 字透传。
    */

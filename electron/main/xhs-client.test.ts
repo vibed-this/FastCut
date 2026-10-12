@@ -121,12 +121,12 @@ describe("XhsClient.buildParseBody", () => {
     ) as Record<string, unknown>;
     expect(params["requestURL"]).toBe("https://www.xiaohongshu.com/explore/abc");
     expect(params["pagePath"]).toBe("/xiaohongshu");
-    expect(params["qualityTier"]).toBe("standard");
+    expect(params["qualityTier"]).toBe("hd");
   });
 
-  it("qualityTier 可覆盖为 hd", () => {
+  it("qualityTier 可覆盖为 standard", () => {
     const c = new XhsClient(async () => new Response("{}", { status: 200 }));
-    const body = c.buildParseBody("https://www.xiaohongshu.com/explore/abc", "K", "S", "hd");
+    const body = c.buildParseBody("https://www.xiaohongshu.com/explore/abc", "K", "S", "standard");
     const keyBytes = createHash("sha256").update("K:S", "utf8").digest();
     const iv = Buffer.from(body["i_970b03"] as string, "base64");
     const raw = Buffer.from(body["p_970b03"] as string, "base64");
@@ -135,26 +135,26 @@ describe("XhsClient.buildParseBody", () => {
     const params = JSON.parse(
       Buffer.concat([d.update(raw.subarray(0, raw.length - 16)), d.final()]).toString("utf8"),
     ) as Record<string, unknown>;
-    expect(params["qualityTier"]).toBe("hd");
+    expect(params["qualityTier"]).toBe("standard");
   });
 });
 
 describe("pickVideoUrl", () => {
-  it("优先 video_fullinfo 中正常画质项", () => {
-    expect(
-      pickVideoUrl({
-        url: "https://x/top.mp4",
-        videos: [
-          {
-            url: "https://x/v.mp4",
-            video_fullinfo: [
-              { url: "https://x/hd.mp4", type: "高清" },
-              { url: "https://x/std.mp4", type: "正常" },
-            ],
-          },
-        ],
-      }),
-    ).toBe("https://x/std.mp4");
+  it("默认优先 video_fullinfo 中高清项", () => {
+    const raw = {
+      url: "https://x/top.mp4",
+      videos: [
+        {
+          url: "https://x/v.mp4",
+          video_fullinfo: [
+            { url: "https://x/hd.mp4", type: "高清" },
+            { url: "https://x/std.mp4", type: "正常" },
+          ],
+        },
+      ],
+    };
+    expect(pickVideoUrl(raw)).toBe("https://x/hd.mp4");
+    expect(pickVideoUrl(raw, "standard")).toBe("https://x/std.mp4");
   });
 
   it("无分档信息时回退顶层 url", () => {
