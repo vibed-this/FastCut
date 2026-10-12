@@ -62,6 +62,10 @@ export interface AppState {
   /** 素材目录：UI 侧会与 null 比较，故类型放宽，初始值仍为 ""。 */
   materialDir: string | null;
   globalError: string | null;
+  /** 分类显示序（后端键：未分类哨兵 ""）。 */
+  categoryOrder: string[];
+  /** 每组内合集 id 序（键为后端分类键：未分类哨兵 ""）。 */
+  collectionOrders: Record<string, string[]>;
 }
 
 export const initialState: AppState = {
@@ -70,6 +74,8 @@ export const initialState: AppState = {
   explorer: null,
   materialDir: "",
   globalError: null,
+  categoryOrder: [],
+  collectionOrders: {},
 };
 
 // ---- Action ----
@@ -80,6 +86,13 @@ export type Action =
   | { type: "collections/rename"; collection_id: string; name: string }
   | { type: "collections/category"; collection_id: string; category?: string }
   | { type: "collections/remove"; collection_id: string }
+  | { type: "collections/reorder"; category: string; orderedIds: string[] }
+  | { type: "categories/reorder"; orderedKeys: string[] }
+  | {
+      type: "sidebar/orders";
+      category_order: string[];
+      collection_orders: Record<string, string[]>;
+    }
   | { type: "material/set"; dir: string }
   | { type: "error/set"; message: string | null }
   | { type: "explorer/open"; collection: Collection }
@@ -174,6 +187,33 @@ export function reducer(state: AppState, action: Action): AppState {
         collections,
         activeCollectionId: closingCurrent ? null : state.activeCollectionId,
         explorer: closingCurrent ? null : state.explorer,
+      };
+    }
+    case "sidebar/orders": {
+      const categoryOrder = action.category_order.map((k) => (k ?? "").trim());
+      const collectionOrders: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(action.collection_orders ?? {})) {
+        collectionOrders[(k ?? "").trim()] = [...v];
+      }
+      return { ...state, categoryOrder, collectionOrders };
+    }
+    case "categories/reorder": {
+      const seen = new Set<string>();
+      const categoryOrder: string[] = [];
+      for (const k of action.orderedKeys) {
+        const key = (k ?? "").trim();
+        if (!seen.has(key)) {
+          seen.add(key);
+          categoryOrder.push(key);
+        }
+      }
+      return { ...state, categoryOrder };
+    }
+    case "collections/reorder": {
+      const key = (action.category ?? "").trim();
+      return {
+        ...state,
+        collectionOrders: { ...state.collectionOrders, [key]: [...action.orderedIds] },
       };
     }
     case "material/set":

@@ -1,7 +1,7 @@
 /** 应用入口：浅色布局与全局初始化。 */
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Alert, App as AntdApp, Empty, Layout } from "antd";
-import { getConfig, listCollections } from "./api";
+import { getConfig, getSidebarOrders, listCollections } from "./api";
 import { useStore } from "./store";
 import Sidebar from "./components/Sidebar";
 import FolderView from "./components/FolderView";
@@ -49,12 +49,23 @@ export default function App(): React.JSX.Element {
     let cancelled = false;
     void (async () => {
       try {
-        const [collections, cfg] = await Promise.all([listCollections(), getConfig()]);
+        const [collections, cfg, sidebarOrders] = await Promise.all([
+          listCollections(),
+          getConfig(),
+          getSidebarOrders().catch(() => null),
+        ]);
         if (cancelled) {
           return;
         }
         dispatch({ type: "collections/set", collections });
         dispatch({ type: "material/set", dir: cfg.target_dir ?? "" });
+        if (sidebarOrders !== null) {
+          dispatch({
+            type: "sidebar/orders",
+            category_order: sidebarOrders.category_order,
+            collection_orders: sidebarOrders.collection_orders,
+          });
+        }
         // 恢复上次打开的合集（仅当它还在列表里；回到根目录，不恢复深层浏览栈）。
         // 若加载期间用户已手动打开（activeIdRef 非空），以用户的选择为准，不覆盖。
         if (activeIdRef.current === null && typeof localStorage !== "undefined") {

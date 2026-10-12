@@ -61,6 +61,10 @@ export interface StoreData {
   config: AppConfig;
   ledger: Record<string, LedgerEntry>;
   collections: Collection[];
+  /** 侧栏分类序（归一化后的分类 key，"" 为未分类）。 */
+  category_order: string[];
+  /** 侧栏各分类内合集 id 序（key 为归一化分类，"" 为未分类，全量数组语义）。 */
+  collection_orders: Record<string, string[]>;
   shares?: LegacySavedShare[];
 }
 
@@ -108,7 +112,7 @@ function defaultConfig(): AppConfig {
 }
 
 function defaultStore(): StoreData {
-  return { config: defaultConfig(), ledger: {}, collections: [] };
+  return { config: defaultConfig(), ledger: {}, collections: [], category_order: [], collection_orders: {} };
 }
 
 /** 大小写不敏感，两端空白忽略。 */
@@ -329,6 +333,41 @@ function parseStoreData(text: string): StoreData {
       out.collections = migrateShares(legacy);
     }
   }
+
+  const categoryOrder = raw["category_order"];
+  if (Array.isArray(categoryOrder)) {
+    const seen = new Set<string>();
+    for (const k of categoryOrder) {
+      if (typeof k !== "string") continue;
+      const key = normalizeCategoryKey(k);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.category_order.push(key);
+    }
+  }
+
+  const collectionOrders = raw["collection_orders"];
+  if (isRecord(collectionOrders)) {
+    for (const [rawKey, v] of Object.entries(collectionOrders)) {
+      if (!Array.isArray(v)) continue;
+      const key = normalizeCategoryKey(rawKey);
+      const seen = new Set<string>();
+      const ids: string[] = [];
+      for (const id of v) {
+        if (typeof id !== "string" || id.trim() === "") continue;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+      }
+      if (out.collection_orders[key] === undefined) {
+        out.collection_orders[key] = ids;
+      } else {
+        for (const id of ids) {
+          if (!out.collection_orders[key].includes(id)) out.collection_orders[key].push(id);
+        }
+      }
+    }
+  }
   return out;
 }
 
@@ -351,6 +390,8 @@ function serializeStoreData(data: StoreData): string {
       relDir: c.relDir ?? null,
       category: c.category ?? null,
     })),
+    category_order: data.category_order ?? [],
+    collection_orders: data.collection_orders ?? {},
   };
   return `${JSON.stringify(normalized, null, 2)}\n`;
 }
@@ -438,6 +479,108 @@ export function normalizeCategory(raw?: string): string | undefined {
   return clean;
 }
 
+/** 排序用的分类 key：去两端空白，空即 ""（未分类哨兵）。 */
+export function normalizeCategoryKey(raw?: string | null): string {
+  if (raw === undefined || raw === null) return "";
+  return raw.trim();
+}
+
+/** 合集所属的排序 key（category 缺省/空白即 ""）。 */
+function categoryKeyOf(c: Collection): string {
+  return normalizeCategoryKey(c.category ?? "");
+}
+
+/** 字符串数组去重（保留首次出现顺序）。 */
+function dedupKeys(keys: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of keys) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+/**
+ * 按存储序排列合集：order 在先，未知 id 按 created_at 追加尾部。
+ * order 中的 stale id 会被忽略，不抛错。
+ */
+export function getOrderedCollections(collections: Collection[], order: string[]): Collection[] {
+  const rank = new Map<string, number>();
+  for (const id of dedupKeys(order)) {
+    if (!rank.has(id)) rank.set(id, rank.size);
+  }
+  const inOrder = collections
+    .filter((c) => rank.has(c.id))
+    .sort((a, b) => (rank.get(a.id) as number) - (rank.get(b.id) as number));
+  const rest = collections
+    .filter((c) => !rank.has(c.id))
+    .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return [...inOrder, ...rest];
+}
+
+/**
+ * 按存储序排列分类 key：order 在先，未知分类按字母序追加尾部。
+ * 输入可为分类 key 数组，或 Collection 数组（此时先取 distinct key）。
+ */
+export function getOrderedCategories(
+  input: string[] | Collection[],
+  order: string[],
+): string[] {
+  const cats =
+    input.length > 0 && typeof input[0] !== "string"
+      ? dedupKeys((input as Collection[]).map(categoryKeyOf))
+      : dedupKeys((input as string[]).map((k) => normalizeCategoryKey(k)));
+  const rank = new Map<string, number>();
+  for (const k of dedupKeys(order.map((k) => normalizeCategoryKey(k)))) {
+    if (!rank.has(k)) rank.set(k, rank.size);
+  }
+  const inOrder = cats
+    .filter((k) => rank.has(k))
+    .sort((a, b) => (rank.get(a) as number) - (rank.get(b) as number));
+  const rest = cats
+    .filter((k) => !rank.has(k))
+    .sort((a, b) => a.localeCompare(b, "zh-CN"));
+  return [...inOrder, ...rest];
+}
+
+/** 确保分类 key 在 category_order 尾部（已存在则不动）。 */
+function ensureCategoryKey(data: StoreData, key: string): void {
+  if (!data.category_order.includes(key)) data.category_order.push(key);
+}
+
+/** 合集 id 追加到其分组序尾部（已存在则不动；缺分组时建空分组）。 */
+function appendCollectionOrder(data: StoreData, key: string, id: string): void {
+  const arr = data.collection_orders[key];
+  if (arr === undefined) {
+    data.collection_orders[key] = [id];
+    return;
+  }
+  if (!arr.includes(id)) arr.push(id);
+}
+
+/** 从分组序中移除 id；分组变空时删分组 key。 */
+function removeCollectionOrder(data: StoreData, key: string, id: string): void {
+  const arr = data.collection_orders[key];
+  if (arr === undefined) return;
+  const idx = arr.indexOf(id);
+  if (idx !== -1) arr.splice(idx, 1);
+  if (arr.length === 0) delete data.collection_orders[key];
+}
+
+/** 该分类下是否还有合集；无则从 category_order 剪枝。 */
+function pruneCategoryKeyIfEmpty(data: StoreData, key: string): void {
+  const stillExists = data.collections.some((c) => categoryKeyOf(c) === key);
+  if (!stillExists) {
+    const idx = data.category_order.indexOf(key);
+    if (idx !== -1) data.category_order.splice(idx, 1);
+    if (data.collection_orders[key] !== undefined && data.collection_orders[key].length === 0) {
+      delete data.collection_orders[key];
+    }
+  }
+}
+
 export async function getConfig(userDataDir: string): Promise<AppConfig> {
   const data = await loadData(userDataDir);
   return { ...data.config };
@@ -520,6 +663,9 @@ export async function addCollection(
     const category = normalizeCategory(input.category);
     if (category !== undefined) item.category = category;
     data.collections.push(item);
+    const key = categoryKeyOf(item);
+    ensureCategoryKey(data, key);
+    appendCollectionOrder(data, key, item.id);
     await saveData(userDataDir, data);
     return { ...item };
   }
@@ -540,6 +686,9 @@ export async function addCollection(
   const category = normalizeCategory(input.category);
   if (category !== undefined) item.category = category;
   data.collections.push(item);
+  const key = categoryKeyOf(item);
+  ensureCategoryKey(data, key);
+  appendCollectionOrder(data, key, item.id);
   await saveData(userDataDir, data);
   return { ...item };
 }
@@ -556,11 +705,19 @@ export async function setCollectionCategory(
   const data = await loadData(userDataDir);
   const item = data.collections.find((c) => c.id === id.trim());
   if (item === undefined) throw new Error("合集不存在");
+  const oldKey = categoryKeyOf(item);
   const clean = normalizeCategory(category);
   if (clean === undefined) {
     delete item.category;
   } else {
     item.category = clean;
+  }
+  const newKey = categoryKeyOf(item);
+  if (oldKey !== newKey) {
+    removeCollectionOrder(data, oldKey, item.id);
+    pruneCategoryKeyIfEmpty(data, oldKey);
+    ensureCategoryKey(data, newKey);
+    appendCollectionOrder(data, newKey, item.id);
   }
   await saveData(userDataDir, data);
   return { ...item };
@@ -628,6 +785,9 @@ export async function removeCollection(userDataDir: string, id: string): Promise
     }
   }
   data.collections.splice(idx, 1);
+  const key = categoryKeyOf(item);
+  removeCollectionOrder(data, key, item.id);
+  pruneCategoryKeyIfEmpty(data, key);
   await saveData(userDataDir, data);
   return { ...item };
 }
@@ -641,5 +801,67 @@ export async function recordLedger(
 ): Promise<void> {
   const data = await loadData(userDataDir);
   data.ledger[ledgerKey(shareId, fileId)] = { ...entry };
+  await saveData(userDataDir, data);
+}
+
+/** 侧栏排序快照（深拷贝，调用方修改不影响落盘）。 */
+export async function getSidebarOrders(userDataDir: string): Promise<{
+  category_order: string[];
+  collection_orders: Record<string, string[]>;
+}> {
+  const data = await loadData(userDataDir);
+  return {
+    category_order: [...data.category_order],
+    collection_orders: Object.fromEntries(
+      Object.entries(data.collection_orders).map(([k, v]) => [k, [...v]]),
+    ),
+  };
+}
+
+/**
+ * 分类排序（全量数组语义）：归一化去重后，stale 分类剪枝（"" 保留），
+ * 缺失的现存分类追加尾部（非空按字母序，"" 补尾），保存并返回生效序。
+ */
+export async function reorderCategories(
+  userDataDir: string,
+  orderedKeys: string[],
+): Promise<string[]> {
+  const data = await loadData(userDataDir);
+  const incoming = dedupKeys(orderedKeys.map((k) => normalizeCategoryKey(k)));
+  const existing = dedupKeys(data.collections.map(categoryKeyOf));
+  const existingSet = new Set(existing);
+  const effective = incoming.filter((k) => k === "" || existingSet.has(k));
+  const effectiveSet = new Set(effective);
+  const missing = existing.filter((k) => !effectiveSet.has(k));
+  const missingNonEmpty = missing.filter((k) => k !== "").sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const missingEmpty = missing.filter((k) => k === "");
+  data.category_order = [...effective, ...missingNonEmpty, ...missingEmpty];
+  await saveData(userDataDir, data);
+  return [...data.category_order];
+}
+
+/**
+ * 同分类内合集排序（全量数组语义）：category 归一化为 key；
+ * orderedIds 有跨组或不存在 id 直接抛错；缺失的本组 id 按 created_at 补尾。
+ */
+export async function reorderCollections(
+  userDataDir: string,
+  category: string,
+  orderedIds: string[],
+): Promise<void> {
+  const key = normalizeCategoryKey(category);
+  const data = await loadData(userDataDir);
+  const group = data.collections.filter((c) => categoryKeyOf(c) === key);
+  const groupSet = new Set(group.map((c) => c.id));
+  const incoming = dedupKeys(orderedIds.map((id) => id.trim()).filter((id) => id !== ""));
+  for (const id of incoming) {
+    if (!groupSet.has(id)) throw new Error("只能在同分类内排序");
+  }
+  const incomingSet = new Set(incoming);
+  const missing = group
+    .filter((c) => !incomingSet.has(c.id))
+    .sort((a, b) => a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((c) => c.id);
+  data.collection_orders[key] = [...incoming, ...missing];
   await saveData(userDataDir, data);
 }

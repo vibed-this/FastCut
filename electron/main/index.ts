@@ -22,11 +22,14 @@ import {
 import {
   addCollection,
   getConfig,
+  getSidebarOrders,
   getStatus,
   getStatusBatch,
   listCollections,
   removeCollection,
   renameCollection,
+  reorderCategories,
+  reorderCollections,
   setCollectionCategory,
   setConfig,
   setIsDownloadingProvider,
@@ -108,6 +111,33 @@ function registerIpcHandlers(userDataDir: string): void {
       if (removed.kind === "alipan") {
         await clearShareThumbnails(userDataDir, removed.share_id ?? removed.id);
       }
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle("category_reorder", async (_e, args: { orderedKeys: string[] }) => {
+    try {
+      return await reorderCategories(userDataDir, args.orderedKeys);
+    } catch (e) {
+      throw new Error(errMsg(e));
+    }
+  });
+
+  ipcMain.handle(
+    "collection_reorder",
+    async (_e, args: { category: string; orderedIds: string[] }) => {
+      try {
+        await reorderCollections(userDataDir, args.category, args.orderedIds);
+      } catch (e) {
+        throw new Error(errMsg(e));
+      }
+    },
+  );
+
+  ipcMain.handle("sidebar_orders", async () => {
+    try {
+      return await getSidebarOrders(userDataDir);
     } catch (e) {
       throw new Error(errMsg(e));
     }

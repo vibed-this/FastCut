@@ -181,6 +181,9 @@ export type IpcChannel =
   | "collection_rename"
   | "collection_remove"
   | "collection_set_category"
+  | "category_reorder"
+  | "collection_reorder"
+  | "sidebar_orders"
   | "fs_list"
   | "fs_mkdir"
   | "fs_rename"
@@ -210,6 +213,12 @@ export interface IpcParams {
   collection_rename: { id: string; name: string };
   collection_remove: { id: string };
   collection_set_category: { id: string; category?: string };
+  /** 分类排序：orderedKeys 为归一化分类 key 全量数组，"" 为未分类。 */
+  category_reorder: { orderedKeys: string[] };
+  /** 同分类内合集排序：category 归一化为 key（"" 为未分类），orderedIds 须全部属于该分类。 */
+  collection_reorder: { category: string; orderedIds: string[] };
+  /** 侧栏排序快照：category_order 含 "" 哨兵，collection_orders 按分类 key 索引。 */
+  sidebar_orders: Record<string, never>;
   fs_list: { relDir?: string };
   fs_mkdir: { relDir: string };
   fs_rename: { relPath: string; name: string };
@@ -265,6 +274,9 @@ export interface IpcResult {
   collection_rename: Collection;
   collection_remove: void;
   collection_set_category: Collection;
+  category_reorder: string[];
+  collection_reorder: void;
+  sidebar_orders: { category_order: string[]; collection_orders: Record<string, string[]> };
   fs_list: LocalItem[];
   fs_mkdir: void;
   fs_rename: void;

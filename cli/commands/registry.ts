@@ -8,10 +8,11 @@
  */
 
 import type { CliCommand } from "../lib/context.js";
+import { categoryCommand } from "../commands/category.js";
 import { collectionCommand } from "../commands/collection.js";
 import { importCommand } from "../commands/import.js";
 
-export { collectionCommand, importCommand };
+export { categoryCommand, collectionCommand, importCommand };
 
 /** 全部顶层子命令（入口按 `name` 分发）。 */
-export const commands: CliCommand[] = [collectionCommand, importCommand];
+export const commands: CliCommand[] = [collectionCommand, categoryCommand, importCommand];

@@ -10,7 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { addCollection, listCollections, setConfig } from "../../electron/main/store.js";
+import {
+  addCollection,
+  getSidebarOrders,
+  listCollections,
+  setConfig,
+} from "../../electron/main/store.js";
 import type { Collection } from "../../electron/shared/contract.js";
 import type { CliContext, CliResult } from "../lib/context.js";
 import { collectionCommand, collectionDeps } from "./collection.js";
@@ -253,5 +258,123 @@ describe("collection rename/remove", () => {
     const removed: CliResult = await collectionCommand.run(ctx(), ["remove", "--id", "thumb1"]);
     expect(removed.code).toBe(0);
     await expect(readFile(cached)).rejects.toThrow();
+  });
+});
+
+describe("collection move", () => {
+  async function addAlipan(id: string, category?: string): Promise<void> {
+    collectionDeps.fetchShareName = stubShareName();
+    const argv: string[] = ["add", "alipan", "--url", `https://www.alipan.com/s/${id}`];
+    if (category !== undefined) argv.push("--category", category);
+    const res: CliResult = await collectionCommand.run(ctx(), argv);
+    expect(res.code).toBe(0);
+  }
+
+  it("组内正常移动并持久化侧栏序", async () => {
+    await addAlipan("m1", "A");
+    await addAlipan("m2", "A");
+    await addAlipan("m3", "A");
+
+    const res: CliResult = await collectionCommand.run(ctx(), ["move", "--id", "m1", "--to", "2"]);
+    expect(res.code).toBe(0);
+    expect(res.data).toEqual(["m2", "m3", "m1"]);
+    expect(res.human).toContain("m1");
+    await expect(getSidebarOrders(dir)).resolves.toMatchObject({
+      collection_orders: { A: ["m2", "m3", "m1"] },
+    });
+  });
+
+  it("越界下标 clamp 到尾部", async () => {
+    await addAlipan("m1", "A");
+    await addAlipan("m2", "A");
+    await addAlipan("m3", "A");
+
+    const res: CliResult = await collectionCommand.run(ctx(), ["move", "--id", "m1", "--to", "99"]);
+    expect(res.code).toBe(0);
+    expect(res.data).toEqual(["m2", "m3", "m1"]);
+  });
+
+  it("无存储序时回退按现存出现顺序", async () => {
+    await addAlipan("m1", "A");
+    await addAlipan("m2", "A");
+    collectionDeps.getSidebarOrders = async () => ({ category_order: [], collection_orders: {} });
+    try {
+      const res: CliResult = await collectionCommand.run(ctx(), [
+        "move",
+        "--id",
+        "m2",
+        "--to",
+        "0",
+      ]);
+      expect(res.code).toBe(0);
+      expect(res.data).toEqual(["m2", "m1"]);
+    } finally {
+      collectionDeps.getSidebarOrders = undefined;
+    }
+  });
+
+  it("to 非法与 id 缺失返回 code 1", async () => {
+    await addAlipan("m1", "A");
+    const cases: string[][] = [
+      ["move"],
+      ["move", "--id", "m1"],
+      ["move", "--to", "0"],
+      ["move", "--id", "m1", "--to", "abc"],
+      ["move", "--id", "m1", "--to", "-1"],
+      ["move", "--id", "m1", "--to", "1.5"],
+    ];
+    for (const argv of cases) {
+      const res: CliResult = await collectionCommand.run(ctx(), argv);
+      expect(res.code).toBe(1);
+      expect(res.errorCode).toBe("USAGE");
+    }
+  });
+
+  it("未知 id 返回 code 2 且透传合集不存在", async () => {
+    const res: CliResult = await collectionCommand.run(ctx(), ["move", "--id", "nope", "--to", "0"]);
+    expect(res.code).toBe(2);
+    expect(res.errorCode).toBe("MOVE_FAILED");
+    expect(res.error).toBe("合集不存在");
+  });
+
+  it("只在组内移动，不影响他组现序", async () => {
+    await addAlipan("a1", "A");
+    await addAlipan("a2", "A");
+    await addAlipan("b1", "B");
+    await addAlipan("b2", "B");
+
+    const res: CliResult = await collectionCommand.run(ctx(), ["move", "--id", "a1", "--to", "1"]);
+    expect(res.code).toBe(0);
+    expect(res.data).toEqual(["a2", "a1"]);
+    await expect(getSidebarOrders(dir)).resolves.toMatchObject({
+      collection_orders: { A: ["a2", "a1"], B: ["b1", "b2"] },
+    });
+  });
+
+  it("dry-run 不调用写函数且不落盘", async () => {
+    await addAlipan("m1", "A");
+    await addAlipan("m2", "A");
+    let calls = 0;
+    collectionDeps.reorderCollections = async (): Promise<void> => {
+      calls += 1;
+    };
+    try {
+      const res: CliResult = await collectionCommand.run(ctx(), [
+        "move",
+        "--id",
+        "m1",
+        "--to",
+        "1",
+        "--dry-run",
+      ]);
+      expect(res.code).toBe(0);
+      expect(res.data).toEqual(["m2", "m1"]);
+      expect(calls).toBe(0);
+      await expect(getSidebarOrders(dir)).resolves.toMatchObject({
+        collection_orders: { A: ["m1", "m2"] },
+      });
+    } finally {
+      collectionDeps.reorderCollections = undefined;
+    }
   });
 });

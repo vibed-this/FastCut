@@ -13,18 +13,24 @@ import {
   extractShareId,
   getConfig,
   getIsDownloadingProvider,
+  getOrderedCategories,
+  getOrderedCollections,
+  getSidebarOrders,
   getStatus,
   getStatusBatch,
   ledgerKey,
   legacyStorePath,
   listCollections,
   normalizeCategory,
+  normalizeCategoryKey,
   normalizeDefinition,
   nowSecs,
   parseShareUrl,
   recordLedger,
   removeCollection,
   renameCollection,
+  reorderCategories,
+  reorderCollections,
   setCollectionCategory,
   setConfig,
   setIsDownloadingProvider,
@@ -549,5 +555,160 @@ describe("collections 分类（category，可空）", () => {
         url: "https://www.alipan.com/s/old1",
       },
     ]);
+  });
+});
+
+describe("侧栏排序持久化", () => {
+  const fetchShareName = async (shareId: string): Promise<string> => `分享-${shareId}`;
+
+  async function addAlipan(id: string, category?: string) {
+    return addCollection(
+      dir,
+      category === undefined
+        ? { kind: "alipan", url: `https://www.alipan.com/s/${id}` }
+        : { kind: "alipan", url: `https://www.alipan.com/s/${id}`, category },
+      { fetchShareName },
+    );
+  }
+
+  it("normalizeCategoryKey 去空白，空即哨兵", () => {
+    expect(normalizeCategoryKey(undefined)).toBe("");
+    expect(normalizeCategoryKey(null)).toBe("");
+    expect(normalizeCategoryKey("   ")).toBe("");
+    expect(normalizeCategoryKey("  学习 ")).toBe("学习");
+  });
+
+  it("旧文件无新字段时兼容读取为空序", async () => {
+    await writeFile(
+      storeFile(),
+      JSON.stringify({
+        config: { target_dir: null, definition: "AUTO" },
+        ledger: {},
+        collections: [
+          {
+            id: "o1",
+            kind: "alipan",
+            name: "旧",
+            created_at: 11,
+            share_id: "o1",
+            url: "https://www.alipan.com/s/o1",
+            pwd: null,
+            relDir: null,
+            category: "学习",
+          },
+        ],
+      }),
+    );
+    await expect(getSidebarOrders(dir)).resolves.toEqual({
+      category_order: [],
+      collection_orders: {},
+    });
+    await expect(listCollections(dir)).resolves.toHaveLength(1);
+  });
+
+  it("非法新字段回默认", async () => {
+    await writeFile(
+      storeFile(),
+      JSON.stringify({
+        config: { target_dir: null, definition: "AUTO" },
+        ledger: {},
+        collections: [],
+        category_order: "bad",
+        collection_orders: [1, 2],
+      }),
+    );
+    await expect(getSidebarOrders(dir)).resolves.toEqual({
+      category_order: [],
+      collection_orders: {},
+    });
+  });
+
+  it("addCollection 维护分组序与分类序", async () => {
+    await addAlipan("a1", "学习");
+    await addAlipan("a2", "学习");
+    await addAlipan("u1");
+    const orders = await getSidebarOrders(dir);
+    expect(orders.category_order).toEqual(["学习", ""]);
+    expect(orders.collection_orders["学习"]).toEqual(["a1", "a2"]);
+    expect(orders.collection_orders[""]).toEqual(["u1"]);
+    const raw = await readRaw();
+    expect(raw["category_order"]).toEqual(["学习", ""]);
+    expect(raw["collection_orders"]).toEqual({ 学习: ["a1", "a2"], "": ["u1"] });
+  });
+
+  it("reorderCategories 去重/剪枝/补缺并保留哨兵", async () => {
+    await addAlipan("b1", "B");
+    await addAlipan("b2", "A");
+    await addAlipan("b3");
+    const effective = await reorderCategories(dir, ["  A ", "A", "stale", "", "B"]);
+    expect(effective).toEqual(["A", "", "B"]);
+    await expect(getSidebarOrders(dir)).resolves.toMatchObject({
+      category_order: ["A", "", "B"],
+    });
+    const partial = await reorderCategories(dir, ["B"]);
+    expect(partial).toEqual(["B", "A", ""]);
+  });
+
+  it("reorderCollections 正常换序与缺失补尾", async () => {
+    await addAlipan("c1", "学习");
+    await addAlipan("c2", "学习");
+    await addAlipan("c3", "学习");
+    await reorderCollections(dir, "学习", ["c3", "c1"]);
+    await expect(getSidebarOrders(dir)).resolves.toMatchObject({
+      collection_orders: expect.objectContaining({ 学习: ["c3", "c1", "c2"] }),
+    });
+    const group = (await listCollections(dir)).filter((c) => c.category === "学习");
+    expect(getOrderedCollections(group, ["c3", "c1", "c2"]).map((c) => c.id)).toEqual([
+      "c3",
+      "c1",
+      "c2",
+    ]);
+  });
+
+  it("reorderCollections 跨组与不存在 id 抛错", async () => {
+    await addAlipan("d1", "A");
+    await addAlipan("d2", "B");
+    await expect(reorderCollections(dir, "A", ["d2"])).rejects.toThrow("只能在同分类内排序");
+    await expect(reorderCollections(dir, "A", ["missing"])).rejects.toThrow(
+      "只能在同分类内排序",
+    );
+    await expect(reorderCollections(dir, "", ["d1"])).rejects.toThrow("只能在同分类内排序");
+  });
+
+  it("setCollectionCategory 旧组移除新组尾部追加", async () => {
+    await addAlipan("e1", "A");
+    await addAlipan("e2", "A");
+    await setCollectionCategory(dir, "e1", "B");
+    const orders = await getSidebarOrders(dir);
+    expect(orders.collection_orders["A"]).toEqual(["e2"]);
+    expect(orders.collection_orders["B"]).toEqual(["e1"]);
+    expect(orders.category_order).toEqual(expect.arrayContaining(["A", "B"]));
+    await setCollectionCategory(dir, "e2", "B");
+    const after = await getSidebarOrders(dir);
+    expect(after.collection_orders["A"]).toBeUndefined();
+    expect(after.collection_orders["B"]).toEqual(["e1", "e2"]);
+    expect(after.category_order).not.toContain("A");
+  });
+
+  it("removeCollection 剪枝两处", async () => {
+    await addAlipan("f1", " solo ");
+    await removeCollection(dir, "f1");
+    await expect(getSidebarOrders(dir)).resolves.toEqual({
+      category_order: [],
+      collection_orders: {},
+    });
+  });
+
+  it("renameCollection 不动排序", async () => {
+    await addAlipan("g1", "A");
+    await addAlipan("g2", "A");
+    const before = await getSidebarOrders(dir);
+    await renameCollection(dir, "g1", "新名");
+    await expect(getSidebarOrders(dir)).resolves.toEqual(before);
+  });
+
+  it("getOrderedCategories 存储序优先未知字母序", () => {
+    expect(getOrderedCategories(["B", "A", "C"], ["C"])).toEqual(["C", "A", "B"]);
+    expect(getOrderedCategories(["B", "A"], [])).toEqual(["A", "B"]);
   });
 });

@@ -263,6 +263,54 @@ export async function setCollectionCategory(
   return toCollection(raw);
 }
 
+/** 侧边栏排序快照：分类序 + 每分类下的合集序（未分类哨兵 ""）。 */
+export interface SidebarOrders {
+  category_order: string[];
+  collection_orders: Record<string, string[]>;
+}
+
+function toSidebarOrders(raw: unknown): SidebarOrders {
+  if (typeof raw !== "object" || raw === null) {
+    return { category_order: [], collection_orders: {} };
+  }
+  const r = raw as Record<string, unknown>;
+  const categoryRaw = r["category_order"];
+  const category_order = Array.isArray(categoryRaw)
+    ? categoryRaw.filter((k): k is string => typeof k === "string")
+    : [];
+  const ordersRaw = r["collection_orders"];
+  const collection_orders: Record<string, string[]> = {};
+  if (typeof ordersRaw === "object" && ordersRaw !== null) {
+    for (const [k, v] of Object.entries(ordersRaw as Record<string, unknown>)) {
+      if (Array.isArray(v)) {
+        collection_orders[k] = v.filter((id): id is string => typeof id === "string");
+      }
+    }
+  }
+  return { category_order, collection_orders };
+}
+
+/** 取侧边栏排序（分类序 + 各组内合集序）。 */
+export async function getSidebarOrders(): Promise<SidebarOrders> {
+  const raw = await invokeRaw<unknown>("sidebar_orders", {});
+  return toSidebarOrders(raw);
+}
+
+/** 分类重排：按给定键序持久化，返回后端确认的 canonical 序。 */
+export async function reorderCategories(orderedKeys: string[]): Promise<string[]> {
+  const raw = await invokeRaw<unknown>("category_reorder", { orderedKeys });
+  if (Array.isArray(raw)) {
+    return raw.filter((k): k is string => typeof k === "string");
+  }
+  return orderedKeys;
+}
+
+/** 合集重排：组内按给定 id 序持久化（category 为 "" 即未分类）。 */
+export async function reorderCollections(category: string, orderedIds: string[]): Promise<void> {
+  const cat = (category ?? "").trim();
+  await invokeRaw<void>("collection_reorder", { category: cat, orderedIds });
+}
+
 // ---- 阿里云盘只读命令（沿用旧 channel，参数名不变） ----
 
 export function getShareMeta(share_id: string, pwd?: string): Promise<ShareMeta> {

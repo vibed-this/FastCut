@@ -10,9 +10,11 @@ import { parseArgs } from "node:util";
 
 import {
   addCollection,
+  getSidebarOrders,
   listCollections,
   removeCollection,
   renameCollection,
+  reorderCollections,
   setCollectionCategory,
 } from "../../electron/main/store.js";
 import { clearShareThumbnails } from "../../electron/main/thumbnail-cache.js";
@@ -20,7 +22,14 @@ import type { Collection } from "../../electron/shared/contract.js";
 import type { CliCommand, CliContext, CliResult } from "../lib/context.js";
 
 /** 用法行（与 `collectionCommand.usage` 保持一致）。 */
-const USAGE = "collection <list|add|rename|remove|set-category> [args]";
+const USAGE = "collection <list|add|rename|remove|set-category|move> [args]";
+
+/**
+ * 对接点：侧栏排序快照即 store.getSidebarOrders 的返回
+ * （`category_order` 为分类序，`collection_orders` 为每组合集 id 序，
+ * 组 key 为归一化分类名，哨兵 `""` 即未分类）。
+ */
+export type SidebarOrders = Awaited<ReturnType<typeof getSidebarOrders>>;
 
 /**
  * `add alipan` 分享名查询的可注入依赖。
@@ -31,6 +40,10 @@ const USAGE = "collection <list|add|rename|remove|set-category> [args]";
 export interface CollectionDeps {
   /** 给定 shareId/pwd 返回分享名。 */
   fetchShareName?: (shareId: string, pwd?: string) => Promise<string>;
+  /** 对接点：读侧栏序（缺省走 store.getSidebarOrders）。 */
+  getSidebarOrders?: (userDataDir: string) => Promise<SidebarOrders>;
+  /** 对接点：按组持久化合集序（缺省走 store.reorderCollections）。 */
+  reorderCollections?: (userDataDir: string, category: string, orderedIds: string[]) => Promise<void>;
 }
 
 /** 模块级可注入依赖（见 `CollectionDeps`）。 */
@@ -50,6 +63,101 @@ function opError(message: string, errorCode: string): CliResult {
 /** 取 Error 的 message，其余值转字符串。 */
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** 合集归属分组：去两端空白，空即未分类哨兵 `""`。 */
+function normalizeGroup(raw?: string | null): string {
+  return (raw ?? "").trim();
+}
+
+/** 对接点解析：优先用注入依赖，否则用 store 同名导出。 */
+function resolveGetSidebarOrders(): (userDataDir: string) => Promise<SidebarOrders> {
+  return collectionDeps.getSidebarOrders ?? getSidebarOrders;
+}
+
+/** 对接点解析：优先用注入依赖，否则用 store 同名导出。 */
+function resolveReorderCollections(): (
+  userDataDir: string,
+  category: string,
+  orderedIds: string[],
+) => Promise<void> {
+  return collectionDeps.reorderCollections ?? reorderCollections;
+}
+
+/**
+ * 取该组现序：有存储序则按其过滤并追加本组新增 id，无存储序则按入参回退序。
+ */
+async function readGroupOrder(
+  userDataDir: string,
+  group: string,
+  fallbackIds: string[],
+): Promise<string[]> {
+  let stored: string[] | undefined;
+  try {
+    const orders: SidebarOrders = await resolveGetSidebarOrders()(userDataDir);
+    const arr: unknown = orders?.collection_orders?.[group];
+    if (Array.isArray(arr) && arr.length > 0) stored = [...(arr as string[])];
+  } catch {
+    stored = undefined;
+  }
+  if (stored === undefined || stored.length === 0) return [...fallbackIds];
+  const inGroup = new Set<string>(fallbackIds);
+  const ordered: string[] = stored.filter((id: string): boolean => inGroup.has(id));
+  for (const id of fallbackIds) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  return ordered;
+}
+
+async function runMove(
+  ctx: CliContext,
+  id: string | undefined,
+  toRaw: string | undefined,
+  dryRun: boolean,
+): Promise<CliResult> {
+  if (id === undefined) {
+    return usageError("缺少参数：--id <id>");
+  }
+  if (toRaw === undefined) {
+    return usageError("缺少参数：--to <index>");
+  }
+  const trimmed: string = toRaw.trim();
+  const n: number = Number(trimmed);
+  if (trimmed === "" || !Number.isInteger(n) || n < 0) {
+    return usageError(`--to 须为非负整数（当前：${toRaw}）`);
+  }
+  try {
+    const items: Collection[] = await listCollections(ctx.userDataDir);
+    const target: Collection | undefined = items.find((c: Collection): boolean => c.id === id.trim());
+    if (target === undefined) {
+      return opError("合集不存在", "MOVE_FAILED");
+    }
+    const group: string = normalizeGroup(target.category);
+    const groupIds: string[] = items
+      .filter((c: Collection): boolean => normalizeGroup(c.category) === group)
+      .map((c: Collection): string => c.id);
+    const ordered: string[] = await readGroupOrder(ctx.userDataDir, group, groupIds);
+    let cur: number = ordered.indexOf(target.id);
+    if (cur === -1) {
+      ordered.push(target.id);
+      cur = ordered.length - 1;
+    }
+    const to: number = Math.min(n, ordered.length - 1);
+    ordered.splice(cur, 1);
+    ordered.splice(to, 0, target.id);
+    const label: string = group === "" ? "未分类" : group;
+    if (dryRun) {
+      return {
+        code: 0,
+        human: `试运行：合集 ${target.id} 将从 ${cur} 移到 ${to}（分类：${label}）`,
+        data: ordered,
+      };
+    }
+    await resolveReorderCollections()(ctx.userDataDir, group, ordered);
+    return { code: 0, human: `已移动合集 ${target.id} 到 ${to}（分类：${label}）`, data: ordered };
+  } catch (e) {
+    return opError(errMsg(e), "MOVE_FAILED");
+  }
 }
 
 /** 合集列表渲染为 `id kind name` 行（有分类时追加 ` [分类]`）。 */
@@ -179,6 +287,8 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
   let id: string | undefined;
   let name: string | undefined;
   let category: string | undefined;
+  let toRaw: string | undefined;
+  let dryRun = false;
   try {
     const parsed = parseArgs({
       args: argv,
@@ -188,6 +298,8 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
         pwd: { type: "string" },
         name: { type: "string" },
         category: { type: "string" },
+        to: { type: "string" },
+        "dry-run": { type: "boolean", default: false },
         help: { type: "boolean", default: false },
       },
       allowPositionals: true,
@@ -201,6 +313,8 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
     id = parsed.values.id;
     name = parsed.values.name;
     category = parsed.values.category;
+    toRaw = parsed.values.to;
+    dryRun = parsed.values["dry-run"] ?? false;
   } catch (e) {
     return usageError(errMsg(e));
   }
@@ -256,6 +370,13 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
       }
       return runSetCategory(ctx, id, category);
     }
+    case "move": {
+      if (positionals.length > 1) {
+        const extra: string = positionals[1] as string;
+        return usageError(`未知参数：${extra}`);
+      }
+      return runMove(ctx, id, toRaw, dryRun);
+    }
     default: {
       if (sub === undefined) {
         return usageError("缺少子命令");
@@ -265,10 +386,10 @@ async function run(ctx: CliContext, argv: string[]): Promise<CliResult> {
   }
 }
 
-/** `collection` 子命令：`collection <list|add|rename|remove|set-category> [args]`。 */
+/** `collection` 子命令：`collection <list|add|rename|remove|set-category|move> [args]`。 */
 export const collectionCommand: CliCommand = {
   name: "collection",
-  describe: "管理合集：查询、新增、重命名、删除与分类",
+  describe: "管理合集：查询、新增、重命名、删除、分类与排序",
   usage: USAGE,
   run,
 };
