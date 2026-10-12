@@ -223,6 +223,8 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       playbackRate: [0.5, 1, 1.5, 2],
       width: "100%",
       height: "100%",
+      // 保持视频原始比例：contain 只缩放不裁切不拉伸，窗口按 videoRatio 贴合后即无黑边。
+      videoFillMode: "contain",
       autoplay: mode === "preview",
       videoAttributes: isLocal ? { preload: "metadata" } : { preload: "metadata", crossorigin: "anonymous" },
     });
@@ -248,17 +250,44 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       void handleSaveRef.current(true);
     });
     // 首帧元数据就绪即回填宽高比，Modal 按比例定窗（竖视频竖窗，无黑边）。
-    const innerVideo = container.querySelector("video");
-    const readRatio = (): void => {
+    // xgplayer 的 <video> 可能在实例化后异步创建：优先走 player 事件，
+    // DOM 查询 + MutationObserver 兜底，避免 listener 挂到空元素导致比例永远回填不上。
+    const readRatio = (): boolean => {
       const v = container.querySelector("video");
       if (v !== null && v.videoWidth > 0 && v.videoHeight > 0) {
         setVideoRatio(v.videoWidth / v.videoHeight);
+        return true;
       }
+      const media = (player as unknown as { media?: HTMLVideoElement }).media;
+      if (media !== undefined && media.videoWidth > 0 && media.videoHeight > 0) {
+        setVideoRatio(media.videoWidth / media.videoHeight);
+        return true;
+      }
+      return false;
     };
-    if (innerVideo !== null && innerVideo.readyState >= 1) {
+    const onMeta = (): void => {
       readRatio();
-    } else {
-      innerVideo?.addEventListener("loadedmetadata", readRatio, { once: true });
+    };
+    let observer: MutationObserver | null = null;
+    if (!readRatio()) {
+      // video 元素已存在但元数据未就绪：直接挂 DOM 事件。
+      container.querySelector("video")?.addEventListener("loadedmetadata", onMeta, { once: true });
+      // xgplayer 转发原生媒体事件：元数据就绪 / 分辨率变化都尝试回填。
+      player.on("loadedmetadata", onMeta);
+      player.on("video_resize", onMeta);
+      // video 元素尚未创建：观察子树，出现即挂事件并尝试读取。
+      observer = new MutationObserver(() => {
+        if (readRatio()) {
+          observer?.disconnect();
+          return;
+        }
+        const v = container.querySelector("video");
+        if (v !== null && !v.dataset.fcRatioBound) {
+          v.dataset.fcRatioBound = "1";
+          v.addEventListener("loadedmetadata", onMeta, { once: true });
+        }
+      });
+      observer.observe(container, { childList: true, subtree: true });
     }
     player.on("error", (err: unknown) => {
       // 本地文件被挪走/删除：alipan 回退远端播一次（仅一次，防循环）；xhs 直接报错。
@@ -304,7 +333,7 @@ export default function VideoPane(props: VideoPaneProps): React.JSX.Element {
       }
     });
     return () => {
-      container.querySelector("video")?.removeEventListener("loadedmetadata", readRatio);
+      observer?.disconnect();
       if (mode === "open" && playerControl.toggle !== null) {
         playerControl.toggle = null;
       }

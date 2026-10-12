@@ -36,7 +36,7 @@ export interface VideoPlayerModalProps {
 export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JSX.Element | null {
   const { open, title, actions, videoRatio, chrome = true, dimmed = false, onClose, children } = props;
   const boxRef = useRef<HTMLDivElement | null>(null);
-  // 窗口尺寸：按视频比例自适应（消除黑边），约束在视口内；无比例时默认尺寸。
+  // 窗口尺寸：视频区按原始比例贴合（无黑边），总高度 = 视频区 + 标题栏；约束在视口内。
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
   useEffect(() => {
     if (!open) {
@@ -45,18 +45,31 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
     const fit = (): void => {
       const titleH = chrome ? 45 : 0;
       const maxW = Math.min(1000, window.innerWidth * 0.92);
-      const maxH = window.innerHeight * 0.86 - titleH;
+      const maxVideoH = Math.max(120, window.innerHeight * 0.86 - titleH);
       if (videoRatio === null || videoRatio === undefined || videoRatio <= 0) {
-        setBoxSize({ width: Math.round(maxW), height: Math.round(Math.min(660, maxH)) });
+        setBoxSize({ width: Math.round(maxW), height: Math.round(Math.min(660, maxVideoH) + titleH) });
         return;
       }
-      let bw = maxW;
-      let bh = bw / videoRatio;
-      if (bh > maxH) {
-        bh = maxH;
-        bw = bh * videoRatio;
+      // 先按宽贴合，超高则按高回算，保证视频区宽高比 == 原始比例。
+      let vw = maxW;
+      let vh = vw / videoRatio;
+      if (vh > maxVideoH) {
+        vh = maxVideoH;
+        vw = vh * videoRatio;
       }
-      setBoxSize({ width: Math.max(320, Math.round(bw)), height: Math.max(240, Math.round(bh)) });
+      // 保比例下限：过小窗口按比例放大，但不超出视口约束（冲突时优先视口）。
+      const minVw = 320;
+      const minVh = 200;
+      if (vw < minVw || vh < minVh) {
+        const scale = Math.max(minVw / vw, minVh / vh);
+        const upW = vw * scale;
+        const upH = vh * scale;
+        if (upW <= maxW && upH <= maxVideoH) {
+          vw = upW;
+          vh = upH;
+        }
+      }
+      setBoxSize({ width: Math.round(vw), height: Math.round(vh + titleH) });
     };
     fit();
     window.addEventListener("resize", fit);
@@ -125,7 +138,8 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         {`@keyframes fc-modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes fc-modal-fade-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes fc-modal-zoom-in { from { opacity: 0; transform: scale(0.92) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-@keyframes fc-modal-zoom-out { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.95); } }`}
+@keyframes fc-modal-zoom-out { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.95); } }
+[data-testid="video-player-body"] video { object-fit: contain !important; background: #000; }`}
       </style>
     <div
       data-testid="video-player-modal"
@@ -174,7 +188,9 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
               display: "flex",
               alignItems: "center",
               gap: 12,
-              padding: "10px 12px",
+              height: 45,
+              boxSizing: "border-box",
+              padding: "0 12px",
               background: "#141414",
               borderBottom: "1px solid #2a2a2a",
             }}
