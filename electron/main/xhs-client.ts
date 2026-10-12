@@ -1,5 +1,5 @@
 /**
- * 小红书解析客户端（M3，仅视频期）。
+ * 小红书解析客户端（视频 + 图文 + 图文/动态照片混合）。
  *
  * 非官方解析链（2026-10-11 实测 profile `20260907`，前端 chunk 逆向）：
  * - `GET https://dy.kukutool.com/` 拿 cookie；
@@ -53,12 +53,28 @@ export interface XhsAuth {
   seed: string;
 }
 
+/**
+ * 笔记类型：
+ * - `video` 纯视频（有直链、无 `pics`）；
+ * - `image` 纯图文（有 `pics`、无直链）；
+ * - `mixed` 图文+动态照片（`pics` 与直链同时存在，实测
+ *   `6a8e5e7d000000001e01750b` 一帖 12 图 + 7 Live 视频，`type` 仍为
+ *   `"videos"`，故不能以 `type` 判，必须以两者是否同时非空判）。
+ */
+export type XhsNoteKind = "video" | "image" | "mixed";
+
 export interface XhsParseResult {
   title: string;
+  /** 首个视频直链（兼容旧字段：纯图文时为 `""`，混合时为首个 Live 视频）。 */
   downloadUrl: string;
   cover: string;
   noteId: string;
   author: string;
+  kind: XhsNoteKind;
+  /** 全部视频/Live 直链（去重保序；纯图文为空）。 */
+  videoUrls: string[];
+  /** 图文原图 URL 列表（去重保序；纯视频为空）。 */
+  images: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +411,11 @@ export class XhsClient {
   }
 
   /**
-   * 解析一条小红书链接（仅视频期）：短链先跳转 → 鉴权 → parse → 解密 →
-   * `{title, downloadUrl, cover, noteId, author}`（默认高清）。
-   * 图集笔记（无 `url` 但有 `pics`）抛 `仅支持视频笔记，图集笔记暂不支持`；
+   * 解析一条小红书链接：短链先跳转 → 鉴权 → parse → 解密 →
+   * `{title, downloadUrl, videoUrls, images, kind, cover, noteId, author}`（默认高清）。
+   * 视频直链缺失且无 `pics` 时抛 `未返回视频直链`；
    * 对方改版（非 200 / 字段缺失）把上游原文截 200 字透传。
+   * 注意：图文+动态照片帖两者同时有值（`kind: "mixed"`），动态照片即视频项。
    */
   async parse(url: string, qualityTier: XhsQualityTier = DEFAULT_QUALITY_TIER): Promise<XhsParseResult> {
     const trimmed = url.trim();
@@ -433,20 +450,27 @@ export class XhsClient {
     const raw = await this.unwrapParseData(json);
     const title = typeof raw["title"] === "string" ? (raw["title"] as string).trim() : "";
     const downloadUrl = pickVideoUrl(raw, qualityTier);
-    if (downloadUrl === "") {
-      const pics = raw["pics"];
-      if (Array.isArray(pics) && pics.length > 0) {
-        throw new Error("仅支持视频笔记，图集笔记暂不支持");
-      }
+    const videoUrls = pickAllVideoUrls(raw, qualityTier);
+    const images = pickImageUrls(raw);
+    if (downloadUrl === "" && videoUrls.length === 0 && images.length === 0) {
       throw new Error(`小红书解析失败：未返回视频直链：${text.slice(0, 200)}`);
     }
     const cover =
       typeof raw["cover"] === "string" && (raw["cover"] as string) !== ""
         ? (raw["cover"] as string)
-        : Array.isArray(raw["pics"]) && typeof raw["pics"][0] === "string"
-          ? (raw["pics"][0] as string)
-          : "";
-    return { title, downloadUrl, cover, noteId, author: extractAuthor(raw) };
+        : (images[0] ?? "");
+    const hasVideo = downloadUrl !== "" || videoUrls.length > 0;
+    const kind: XhsNoteKind = hasVideo ? (images.length > 0 ? "mixed" : "video") : "image";
+    return {
+      title,
+      downloadUrl,
+      cover,
+      noteId,
+      author: extractAuthor(raw),
+      kind,
+      videoUrls,
+      images,
+    };
   }
 
   /** `/api/parse` 响应解包：加密形 `{data:string, iv:string}` 解密；明文形直接取。 */
@@ -506,6 +530,79 @@ export function pickVideoUrl(
   }
   if (top !== "") return top;
   return flats.length > 0 ? (flats[0]?.url ?? "") : "";
+}
+
+/**
+ * 收集全部视频/Live 直链（去重保序）：顶层 `url` 放首位，其后为
+ * `videos[].url` + `videos[].video_fullinfo[].url`。`qualityTier` 仅影响
+ * 首选排序（`pickVideoUrl` 的结果会被提到首位），不丢弃其他档，保证
+ * 图文+动态照片帖的 7 条 Live 全可取。纯图文返回 `[]`。
+ */
+export function pickAllVideoUrls(
+  raw: Record<string, unknown>,
+  qualityTier: XhsQualityTier = DEFAULT_QUALITY_TIER,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (u: unknown): void => {
+    if (typeof u !== "string") return;
+    const t = u.trim();
+    if (t === "" || seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  const top = typeof raw["url"] === "string" ? (raw["url"] as string) : "";
+  push(top);
+  const videos = raw["videos"];
+  if (Array.isArray(videos)) {
+    for (const v of videos) {
+      if (typeof v !== "object" || v === null) continue;
+      const rec = v as Record<string, unknown>;
+      push(rec["url"]);
+      const full = rec["video_fullinfo"];
+      if (Array.isArray(full)) {
+        for (const f of full) {
+          if (typeof f !== "object" || f === null) continue;
+          push((f as Record<string, unknown>)["url"]);
+        }
+      }
+    }
+  }
+  // 首选画质项提首位（与 pickVideoUrl 同规则），其余顺序不变。
+  const preferred = pickVideoUrl(raw, qualityTier);
+  if (preferred !== "") {
+    const idx = out.indexOf(preferred);
+    if (idx > 0) {
+      out.splice(idx, 1);
+      out.unshift(preferred);
+    }
+  }
+  return out;
+}
+
+/**
+ * 从解密载荷提取图文原图 URL（去重保序）：`pics` 项可为字符串或
+ * `{url}` 对象（防御对方改版），其他形状忽略。实测混合帖 `pics` 为
+ * `string[]`（12 条，`notes_pre_post` 静态 + `note_pre_post_uhdr` Live 封面）。
+ */
+export function pickImageUrls(raw: Record<string, unknown>): string[] {
+  const pics = raw["pics"];
+  if (!Array.isArray(pics)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of pics) {
+    let u = "";
+    if (typeof p === "string") u = p;
+    else if (typeof p === "object" && p !== null) {
+      const rec = p as Record<string, unknown>;
+      if (typeof rec["url"] === "string") u = rec["url"] as string;
+    }
+    u = u.trim();
+    if (u === "" || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
 }
 
 function extractAuthor(raw: Record<string, unknown>): string {

@@ -11,6 +11,8 @@ import {
   customB64encode,
   decryptPayload,
   extractNoteId,
+  pickAllVideoUrls,
+  pickImageUrls,
   pickVideoUrl,
   sanitizeTitle,
   xorString,
@@ -228,14 +230,65 @@ describe("XhsClient.auth/parse（mock 网络）", () => {
     expect(r.downloadUrl).toBe("https://example.com/v.mp4");
     expect(r.cover).toBe("https://example.com/c.jpg");
     expect(r.noteId).toBe("68f1a2b3000000001b02c3d4");
+    expect(r.kind).toBe("video");
+    expect(r.videoUrls).toEqual(["https://example.com/v.mp4"]);
+    expect(r.images).toEqual([]);
   });
 
-  it("图集无 url 报仅支持视频", async () => {
-    const fetchFn = mockFetchForParse({ data: { pics: ["https://x/y.jpg"] }, iv: "e" });
+  it("纯图文：无 url 但有 pics 时返回 kind=image", async () => {
+    const fetchFn = mockFetchForParse(
+      { data: { title: "t", pics: ["https://x/y.jpg", "https://x/y.jpg "] }, iv: "e" },
+    );
+    const c = new XhsClient(fetchFn as unknown as typeof fetch);
+    const r = await c.parse("https://www.xiaohongshu.com/explore/abc");
+    expect(r.kind).toBe("image");
+    expect(r.downloadUrl).toBe("");
+    expect(r.videoUrls).toEqual([]);
+    expect(r.images).toEqual(["https://x/y.jpg"]);
+    expect(r.cover).toBe("https://x/y.jpg");
+  });
+
+  it("混合：pics 与直链同时存在时返回 kind=mixed（动态照片即视频项）", async () => {
+    const fetchFn = mockFetchForParse({
+      data: {
+        title: "t",
+        url: "https://x/live1.mp4",
+        videos: [{ url: "https://x/live1.mp4" }, { url: "https://x/live2.mp4" }],
+        pics: ["https://x/a.jpg", "https://x/b.jpg"],
+      },
+      iv: "e",
+    });
+    const c = new XhsClient(fetchFn as unknown as typeof fetch);
+    const r = await c.parse("https://www.xiaohongshu.com/explore/abc");
+    expect(r.kind).toBe("mixed");
+    expect(r.downloadUrl).toBe("https://x/live1.mp4");
+    expect(r.videoUrls).toEqual(["https://x/live1.mp4", "https://x/live2.mp4"]);
+    expect(r.images).toEqual(["https://x/a.jpg", "https://x/b.jpg"]);
+  });
+
+  it("无直链无图时仍抛未返回视频直链", async () => {
+    const fetchFn = mockFetchForParse({ data: { title: "t" }, iv: "e" });
     const c = new XhsClient(fetchFn as unknown as typeof fetch);
     await expect(c.parse("https://www.xiaohongshu.com/explore/abc")).rejects.toThrowError(
-      /仅支持视频笔记/,
+      /未返回视频直链/,
     );
+  });
+
+  it("pickImageUrls：对象形 {url} 与去重", () => {
+    expect(
+      pickImageUrls({ pics: ["https://x/a.jpg", { url: "https://x/b.jpg" }, 123, ""] }),
+    ).toEqual(["https://x/a.jpg", "https://x/b.jpg"]);
+    expect(pickImageUrls({})).toEqual([]);
+  });
+
+  it("pickAllVideoUrls：顶层 url 首位、去重", () => {
+    expect(
+      pickAllVideoUrls({
+        url: "https://x/top.mp4",
+        videos: [{ url: "https://x/top.mp4" }, { url: "https://x/v2.mp4" }],
+      }),
+    ).toEqual(["https://x/top.mp4", "https://x/v2.mp4"]);
+    expect(pickAllVideoUrls({})).toEqual([]);
   });
 
   it("对方改版：鉴权 500 透传原文", async () => {

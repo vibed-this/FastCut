@@ -33,7 +33,16 @@ interface XhsFixtures {
 const fixtures: XhsFixtures = vi.hoisted(() => ({
   parseCalls: [],
   parseImpl: (_url: string): Promise<XhsParseResult> =>
-    Promise.resolve({ title: "", downloadUrl: "", cover: "", noteId: "", author: "" }),
+    Promise.resolve({
+      title: "",
+      downloadUrl: "",
+      cover: "",
+      noteId: "",
+      author: "",
+      kind: "video",
+      videoUrls: [],
+      images: [],
+    }),
   downloadCalls: [],
   downloadImpl: (_opts: DownloadXhsDirectOptions): Promise<string> => Promise.resolve("started"),
   waitCalls: [],
@@ -95,6 +104,9 @@ const PARSE_FIXTURE: XhsParseResult = {
   cover: "https://cdn.example.com/c.jpg",
   noteId: "abc123",
   author: "作者",
+  kind: "video",
+  videoUrls: ["https://cdn.example.com/v.mp4"],
+  images: [],
 };
 
 function ctx(): CliContext {
