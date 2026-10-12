@@ -42,8 +42,9 @@ import {
 } from "../api";
 import type { FileStatus, FsEntry, ShareItem } from "../api";
 import { detectShareLink } from "../../../electron/shared/share-link";
-import { useStore, type ExplorerFile } from "../store";
+import { useStore, type ExplorerFile, type ExplorerProgress } from "../store";
 import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
+import { formatBytes, progressPercent, selectXhsPending } from "./pendingTiles";
 
 /** 文件夹视图属性。 */
 export interface FolderViewProps {
@@ -185,6 +186,57 @@ function ThumbImage(props: { src: string; name: string; video: boolean }): React
 }
 
 /**
+ * 缩略图底部进度叠加：百分比 + 进度条；总量未知时展示已下载字节。
+ *
+ * @param props - 已下载量与总量
+ * @returns 进度叠加元素
+ */
+function ThumbProgressOverlay(props: { done: number; total: number }): React.JSX.Element {
+  const { done, total } = props;
+  const pct = progressPercent(done, total);
+  return (
+    <div
+      data-testid="tile-progress"
+      title={pct !== null ? `下载中 ${pct}%` : `下载中 ${formatBytes(done)}`}
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 2,
+        padding: "10px 6px 6px",
+        background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
+        color: "#fff",
+        fontSize: 11,
+        lineHeight: "14px",
+        textAlign: "center",
+        pointerEvents: "none",
+      }}
+    >
+      <div
+        style={{
+          height: 4,
+          borderRadius: 2,
+          background: "rgba(255,255,255,0.35)",
+          overflow: "hidden",
+          marginBottom: 4,
+        }}
+      >
+        <div
+          style={{
+            height: "100%",
+            width: pct !== null ? `${pct}%` : "25%",
+            background: "#1677ff",
+            transition: "width 0.2s ease",
+          }}
+        />
+      </div>
+      <span>{pct !== null ? `${pct}%` : formatBytes(done)}</span>
+    </div>
+  );
+}
+
+/**
  * 文件夹视图（双模式：alipan 只读远端网格，xiaohongshu 本地 fs 网格+写操作）。
  *
  * @param props - 组件属性
@@ -237,6 +289,9 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameLoading, setRenameLoading] = useState(false);
+  /** 解析中占位（点导入后、后端开始推进度前的空窗期）：id 序列 + 原链接。 */
+  const [xhsParsing, setXhsParsing] = useState<{ id: number; url: string }[]>([]);
+  const parsingSeqRef = useRef(0);
 
   /** 后台预取一批缩略图（fire-and-forget：失败回退远程 URL，不弹错）。 */
   function warmBatch(collectionId: string, batch: ShareItem[]): void {
@@ -446,7 +501,15 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       dispatch({
         type: "explorer/progress",
         file_id: p.file_id,
-        progress: { done: p.done, total: p.total },
+        // 小红书载荷多带展示字段（name/relDir/cover/title），虚拟占位用；alipan 无则为 undefined。
+        progress: {
+          done: p.done,
+          total: p.total,
+          name: p.name,
+          relDir: p.relDir,
+          cover: p.cover,
+          title: p.title,
+        },
       });
     }).then((off) => {
       if (cancelled) {
@@ -614,6 +677,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     }
     setImportConfirming(true);
     setImportError("");
+    // 解析空窗期先占位（后端 parse 完成后才有进度事件，见 xhsParsing 渲染）。
+    parsingSeqRef.current += 1;
+    const parsingId = parsingSeqRef.current;
+    setXhsParsing((prev) => [...prev, { id: parsingId, url }]);
     try {
       await xhsImport(url, {
         collectionId: currentExplorer.collection_id,
@@ -628,6 +695,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       // 行内报错，不关弹窗，方便换链接重试
       setImportError(e instanceof Error ? e.message : String(e));
     } finally {
+      setXhsParsing((prev) => prev.filter((p) => p.id !== parsingId));
       setImportConfirming(false);
     }
   }
@@ -766,6 +834,19 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     [xhsItems],
   );
 
+  /** 当前目录已有的真实文件名（虚拟占位去重退场用）。 */
+  const xhsExistingNames = useMemo(() => new Set(sortedXhs.map((e) => e.name)), [sortedXhs]);
+  /** 下载中虚拟占位：进度有、真实条目尚无的项（落盘刷新后自动退场）。 */
+  const xhsPending = useMemo(
+    () =>
+      isXhs
+        ? selectXhsPending(currentExplorer.progress, collectionKey, currentRelDir, xhsExistingNames)
+        : [],
+    // progress 为引用型：每次进度事件都是新对象，天然触发重算。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isXhs, currentExplorer.progress, collectionKey, currentRelDir, xhsExistingNames],
+  );
+
   /** 单个缩略图磁贴（图片/视频均用服务端 thumbnail 快照，无则回退图标）。 */
   function renderTile(item: ExplorerFile): React.JSX.Element {
     const isFolder = item.type === "folder";
@@ -778,6 +859,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       (currentExplorer.progress?.[item.file_id] !== undefined ||
         st?.state === "downloading" ||
         tilePendingMap[item.file_id] === true);
+    /** 下载进度（有数值才在缩略图上叠加展示；取链空窗期仅转圈）。 */
+    const progEntry: ExplorerProgress | undefined = isFolder
+      ? undefined
+      : currentExplorer.progress?.[item.file_id];
     /** 已保存落盘路径（拖出的真实文件）；下载中/未保存时为 undefined。 */
     const savedPath =
       !isFolder && !downloading && st?.state === "saved" && st.path !== undefined && st.path !== ""
@@ -932,6 +1017,9 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         >
           {cornerMark}
           {cover}
+          {progEntry !== undefined && (progEntry.total > 0 || progEntry.done > 0) ? (
+            <ThumbProgressOverlay done={progEntry.done} total={progEntry.total} />
+          ) : null}
         </div>
         <Typography.Paragraph
           ellipsis={{ rows: 2, tooltip: item.name }}
@@ -1060,6 +1148,124 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     );
   }
 
+  /** 小红书下载中虚拟占位磁贴（文件未落盘、无真实条目；进度清/落盘后退场，不可点/不可拖）。 */
+  function renderXhsPendingTile(
+    key: string,
+    prog: ExplorerProgress,
+    name: string,
+  ): React.JSX.Element {
+    const coverUrl = prog.cover?.trim() ?? "";
+    const cover =
+      coverUrl !== "" ? (
+        <ThumbImage src={coverUrl} name={name} video />
+      ) : (
+        <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
+      );
+    return (
+      <div
+        data-testid="pending-tile"
+        data-progress-key={key}
+        title={`下载中：${name}`}
+        style={{
+          width: 132,
+          padding: "12px 8px 8px",
+          borderRadius: 8,
+          border: "1px dashed #91caff",
+          background: "#f0f6ff",
+          cursor: "default",
+          opacity: 0.92,
+          textAlign: "center",
+          outline: "none",
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "1 / 1",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+            borderRadius: 6,
+          }}
+        >
+          <span
+            data-testid="tile-downloading"
+            title="下载中…"
+            style={{
+              position: "absolute",
+              top: 6,
+              left: 6,
+              zIndex: 3,
+              width: 24,
+              height: 24,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#fff",
+              borderRadius: "50%",
+              boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+            }}
+          >
+            <LoadingOutlined style={{ fontSize: 14, color: "#1677ff" }} spin />
+          </span>
+          {cover}
+          <ThumbProgressOverlay done={prog.done} total={prog.total} />
+        </div>
+        <Typography.Paragraph
+          ellipsis={{ rows: 2, tooltip: name }}
+          style={{ fontSize: 12, margin: "8px 0 2px", minHeight: 32, lineHeight: "16px" }}
+        >
+          {name}
+        </Typography.Paragraph>
+      </div>
+    );
+  }
+
+  /** 小红书解析中占位（点导入后、后端开始推进度前的空窗期）。 */
+  function renderXhsParsingTile(entry: { id: number; url: string }): React.JSX.Element {
+    return (
+      <div
+        data-testid="pending-tile-parsing"
+        title={entry.url}
+        style={{
+          width: 132,
+          padding: "12px 8px 8px",
+          borderRadius: 8,
+          border: "1px dashed #d9d9d9",
+          background: "#fafafa",
+          cursor: "default",
+          opacity: 0.85,
+          textAlign: "center",
+          outline: "none",
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "1 / 1",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+            borderRadius: 6,
+            background: "#f0f0f0",
+          }}
+        >
+          <LoadingOutlined style={{ fontSize: 28, color: "#1677ff" }} spin />
+        </div>
+        <Typography.Paragraph
+          ellipsis={{ rows: 2, tooltip: "正在解析链接…" }}
+          style={{ fontSize: 12, margin: "8px 0 2px", minHeight: 32, lineHeight: "16px" }}
+        >
+          正在解析链接…
+        </Typography.Paragraph>
+      </div>
+    );
+  }
+
   const writeDisabledTip = "网盘合集为只读，仅支持浏览与下载";
 
   return (
@@ -1179,6 +1385,12 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
                 <Typography.Text type="secondary">空文件夹</Typography.Text>
               ) : (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignContent: "flex-start" }}>
+                  {xhsParsing.map((p) => (
+                    <div key={`parsing-${p.id}`}>{renderXhsParsingTile(p)}</div>
+                  ))}
+                  {xhsPending.map((t) => (
+                    <div key={t.key}>{renderXhsPendingTile(t.key, t.progress, t.name)}</div>
+                  ))}
                   {sortedXhs.map((entry) => (
                     <div key={entry.relPath}>{renderXhsTile(entry)}</div>
                   ))}

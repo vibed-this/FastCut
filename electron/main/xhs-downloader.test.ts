@@ -95,6 +95,12 @@ describe("downloadXhsDirect", () => {
     expect(meta["title"]).toBe("我的视频");
     const prog = emits.filter((e) => e.event === "download-progress");
     expect(prog.length).toBeGreaterThan(0);
+    // 进度载荷透传展示字段（前端虚拟占位用）。
+    const firstProg = prog[0]!.payload as Record<string, unknown>;
+    expect(firstProg["name"]).toBe("我的视频.mp4");
+    expect(firstProg["title"]).toBe("我的视频");
+    expect(firstProg["cover"]).toBe("https://x/c.jpg");
+    expect(firstProg["relDir"]).toBe("collections/mycoll");
     expect(recordLedger).toHaveBeenCalledOnce();
   });
 

@@ -23,6 +23,14 @@ export interface ExplorerVideo {
 export interface ExplorerProgress {
   done: number;
   total: number;
+  /**
+   * 虚拟占位展示字段（小红书下载由 `download-progress` 透传）：
+   * 落盘名 / 落盘相对目录 / 封面 / 标题。alipan 下载无这些字段。
+   */
+  name?: string;
+  relDir?: string;
+  cover?: string;
+  title?: string;
 }
 
 /** 浏览文件：云盘条目原样；小红书本地文件经合成（absPath 为本地绝对路径）。 */

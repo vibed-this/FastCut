@@ -703,6 +703,11 @@ async function run_xhs_pipeline(
   }
   const outPath = unique_mp4_path(dir, `${stem}.mp4`);
   const basename = path.basename(outPath);
+  const { noteId, author, cover } = xhsMetaOf(opts);
+  const title = (opts.title ?? opts.meta?.title ?? stem).trim() || stem;
+  // 进度事件展示字段（前端虚拟占位用）：落盘名 + 相对目录 + 笔记元信息。
+  const relForEvent = path.relative(dirRaw, dir).split(path.sep).join("/");
+  const progressMeta = { name: basename, relDir: relForEvent, cover, title };
 
   let resp: Response;
   try {
@@ -725,7 +730,12 @@ async function run_xhs_pipeline(
     if (buf.length === 0) throw new Error("下载内容为空，下载中止");
     await writeFile(outPath, buf);
     done = buf.length;
-    const payload: DownloadProgressPayload = { file_id: fileId, done, total: total || done };
+    const payload: DownloadProgressPayload = {
+      file_id: fileId,
+      done,
+      total: total || done,
+      ...progressMeta,
+    };
     opts.emit("download-progress", payload);
   } else {
     await new Promise<void>((resolve, reject) => {
@@ -745,7 +755,7 @@ async function run_xhs_pipeline(
               await new Promise<void>((r) => stream.once("drain", r));
             }
             done += buf.length;
-            const payload: DownloadProgressPayload = { file_id: fileId, done, total };
+            const payload: DownloadProgressPayload = { file_id: fileId, done, total, ...progressMeta };
             opts.emit("download-progress", payload);
           }
           stream.end();
@@ -759,8 +769,6 @@ async function run_xhs_pipeline(
     throw new Error("下载内容为空，下载中止");
   }
 
-  const { noteId, author, cover } = xhsMetaOf(opts);
-  const title = (opts.title ?? opts.meta?.title ?? stem).trim() || stem;
   const sidecar: XhsSidecar = {
     source: "xiaohongshu",
     note_id: noteId,

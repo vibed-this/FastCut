@@ -150,6 +150,18 @@ export interface DownloadProgressPayload {
   file_id: string;
   done: number;
   total: number;
+  /**
+   * 小红书直链下载透传的展示字段（虚拟占位用，可选）：
+   * - `name` 落盘 basename（含 `.mp4`，已做重名唯一化）；
+   * - `relDir` 落盘目录（相对 `target_dir` 的完整路径）；
+   * - `cover` 笔记封面 URL（占位缩略图用）；
+   * - `title` 笔记标题（无后缀）。
+   * alipan 分片下载不带这些字段。
+   */
+  name?: string;
+  relDir?: string;
+  cover?: string;
+  title?: string;
 }
 
 /** download-done 事件载荷。 */
