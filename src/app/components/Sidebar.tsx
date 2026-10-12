@@ -20,6 +20,7 @@ import {
   DeleteOutlined,
   EllipsisOutlined,
   PlusOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import {
   addCollection,
@@ -477,31 +478,30 @@ export default function Sidebar(props: SidebarProps): React.JSX.Element {
     <div className={className} style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <style>{`.ant-list .ant-list-item.collection-list-item .ant-list-item-action{opacity:0;pointer-events:none;transition:opacity .15s;margin-inline-start:8px}
 .ant-list .ant-list-item.collection-list-item:hover .ant-list-item-action,.ant-list .ant-list-item.collection-list-item:focus-within .ant-list-item-action{opacity:1;pointer-events:auto}`}</style>
-      <div style={{ padding: "12px 12px 0" }}>
-        <Input.Search
+      <div style={{ padding: "12px 12px 0", display: "flex", gap: 8, alignItems: "center" }}>
+        <Input
           data-testid="collection-search-input"
           placeholder="搜索集合名称"
           allowClear
+          prefix={<SearchOutlined style={{ color: "#bfbfbf" }} />}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
           }}
+          style={{ flex: 1, minWidth: 0 }}
         />
-      </div>
-      <div style={{ padding: 12 }}>
         <Button
           data-testid="add-collection-btn"
           type="primary"
           icon={<PlusOutlined />}
-          block
+          aria-label="新建合集"
+          title="新建合集"
           onClick={() => {
             handleOpenAdd();
           }}
-        >
-          新建合集
-        </Button>
+        />
       </div>
-      <div ref={listScrollRef} style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
+      <div ref={listScrollRef} style={{ flex: 1, overflowY: "auto", padding: "12px 8px 12px" }}>
         {state.collections.length === 0 ? (
           <Empty description="暂无合集，请先新建" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : filtered.length === 0 ? (
