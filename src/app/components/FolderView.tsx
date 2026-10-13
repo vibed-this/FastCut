@@ -44,6 +44,8 @@ import type { FileStatus, FsEntry, ShareItem } from "../api";
 import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore, type ExplorerFile, type ExplorerProgress } from "../store";
 import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
+import ImagePane from "./ImagePane";
+import { toLocalMediaUrl } from "../../../electron/shared/media-url";
 import { formatBytes, progressPercent, selectXhsPending } from "./pendingTiles";
 
 /** 文件夹视图属性。 */
@@ -85,6 +87,29 @@ export function isVideoFile(item: ShareItem): boolean {
   return ["mp4", "mkv", "mov", "m3u8", "avi", "webm"].includes(ext);
 }
 
+/** 图片扩展名（预览与磁贴共用；含常见静态/动态格式）。 */
+const IMAGE_EXTS = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "heic", "heif"];
+
+/** 是否为图片文件（App 层空格/点击预览共用）。 */
+export function isImageFile(item: ShareItem): boolean {
+  if (item.type === "folder") {
+    return false;
+  }
+  if (item.category === "image") {
+    return true;
+  }
+  const ext = (item.file_extension ?? "").toLowerCase();
+  if (ext !== "") {
+    return IMAGE_EXTS.includes(ext);
+  }
+  return IMAGE_EXTS.includes(extOf(item.name));
+}
+
+/** 是否可预览（视频或图片；文件夹另行进入）。 */
+export function isPreviewableFile(item: ShareItem): boolean {
+  return isVideoFile(item) || isImageFile(item);
+}
+
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i < 0 ? "" : name.slice(i + 1).toLowerCase();
@@ -94,15 +119,20 @@ function isVideoName(name: string): boolean {
   return ["mp4", "mkv", "mov", "m3u8", "avi", "webm"].includes(extOf(name));
 }
 
-/** 本地条目 → 浏览文件（file_id 即 relPath，video 判定走扩展名）。 */
+function isImageName(name: string): boolean {
+  return ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "heic", "heif"].includes(extOf(name));
+}
+
+/** 本地条目 → 浏览文件（file_id 即 relPath，video/image 判定走扩展名）。 */
 function fsEntryToFile(e: FsEntry): ExplorerFile {
   const video = !e.isDir && isVideoName(e.name);
+  const image = !e.isDir && !video && isImageName(e.name);
   return {
     file_id: e.relPath,
     drive_id: "local",
     name: e.name,
     type: e.isDir ? "folder" : "file",
-    category: video ? "video" : undefined,
+    category: video ? "video" : image ? "image" : undefined,
     file_extension: e.isDir ? undefined : extOf(e.name),
     absPath: e.absPath,
   };
@@ -851,7 +881,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
   function renderTile(item: ExplorerFile): React.JSX.Element {
     const isFolder = item.type === "folder";
     const isVideo = isVideoFile(item);
-    const previewable = isFolder || isVideo;
+    const isImage = !isFolder && !isVideo && isImageFile(item);
+    const previewable = isFolder || isVideo || isImage;
     const selected = currentExplorer.selected_file?.file_id === item.file_id;
     const st = statusMap[item.file_id];
     const downloading =
@@ -946,6 +977,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       <ThumbImage src={thumbLocalMap[item.file_id] ?? item.thumbnail} name={item.name} video={isVideo} />
     ) : isVideo ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
+    ) : isImage ? (
+      <FileOutlined style={{ fontSize: 52, color: "#999" }} />
     ) : (
       <FileOutlined style={{ fontSize: 52, color: "#999" }} />
     );
@@ -967,7 +1000,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         onClick={() => {
           if (isFolder) {
             enterFolder(item);
-          } else if (isVideo) {
+          } else if (isVideo || isImage) {
             openFile(item);
           }
         }}
@@ -1036,7 +1069,8 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     const file = fsEntryToFile(entry);
     const isFolder = entry.isDir;
     const isVideo = !isFolder && isVideoFile(file);
-    const previewable = isFolder || isVideo;
+    const isImage = !isFolder && !isVideo && isImageFile(file);
+    const previewable = isFolder || isVideo || isImage;
     const selected =
       currentExplorer.selected_file?.file_id === entry.relPath ||
       xhsSelected.includes(entry.relPath);
@@ -1064,6 +1098,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         <LoadingOutlined style={{ fontSize: 14, color: "#1677ff" }} spin />
       </span>
     ) : null;
+    const localImageSrc =
+      isImage && entry.absPath !== undefined && entry.absPath !== ""
+        ? toLocalMediaUrl(entry.absPath)
+        : undefined;
     const cover = isFolder ? (
       <FolderFilled style={{ fontSize: 56, color: "#f5c542" }} />
     ) : isVideo && localThumbMap[entry.relPath] !== undefined ? (
@@ -1075,6 +1113,11 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       />
     ) : isVideo ? (
       <VideoCameraOutlined style={{ fontSize: 52, color: "#666" }} />
+    ) : isImage && localImageSrc !== undefined ? (
+      // 本地图片直显原图（media://），失败回退图标
+      <ThumbImage src={localImageSrc} name={entry.name} video={false} />
+    ) : isImage ? (
+      <FileOutlined style={{ fontSize: 52, color: "#999" }} />
     ) : (
       <FileOutlined style={{ fontSize: 52, color: "#999" }} />
     );
@@ -1093,7 +1136,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         onClick={() => {
           if (isFolder) {
             enterFolder(file);
-          } else if (isVideo) {
+          } else if (isVideo || isImage) {
             openFile(file);
           } else {
             toggleXhsSelect(entry.relPath);
@@ -1444,8 +1487,20 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
           )}
         </Space>
       </div>
-      {explorer.opened_file !== undefined ? <VideoPane mode="open" /> : null}
-      {explorer.preview_file !== undefined ? <VideoPane mode="preview" /> : null}
+      {explorer.opened_file !== undefined ? (
+        isImageFile(explorer.opened_file) ? (
+          <ImagePane mode="open" />
+        ) : (
+          <VideoPane mode="open" />
+        )
+      ) : null}
+      {explorer.preview_file !== undefined ? (
+        isImageFile(explorer.preview_file) ? (
+          <ImagePane mode="preview" />
+        ) : (
+          <VideoPane mode="preview" />
+        )
+      ) : null}
       <Modal
         title="导入小红书链接"
         open={importOpen}

@@ -5,7 +5,7 @@ import { getConfig, getSidebarOrders, listCollections } from "./api";
 import { useStore } from "./store";
 import Sidebar from "./components/Sidebar";
 import FolderView from "./components/FolderView";
-import { isVideoFile } from "./components/FolderView";
+import { isPreviewableFile } from "./components/FolderView";
 import { playerControl } from "./components/VideoPane";
 import {
   DEFAULT_SIDER_WIDTH,
@@ -144,8 +144,8 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  // 全局空格（Quick Look 语义）：预览开着→关闭；完整播放器开着→播放/暂停；
-  // 否则 hover 视频→空格预览（无 hover 时回退选中）。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
+  // 全局空格（Quick Look 语义）：预览开着→关闭；完整播放器开着→播放/暂停（图片无动作）；
+  // 否则 hover 视频/图片→空格预览（无 hover 时回退选中）。输入框/按钮聚焦时不劫持，保证空格正常输入与点击。
   const hasExplorer = explorer !== null;
   const previewFileId = explorer?.preview_file?.file_id ?? null;
   const openedFileId = explorer?.opened_file?.file_id ?? null;
@@ -175,9 +175,10 @@ export default function App(): React.JSX.Element {
         }
         return;
       }
-      // hover 优先：鼠标/键盘焦点所在的视频；无 hover 时回退选中（兼容无鼠标场景）。
-      const previewTarget = hoveredFile !== undefined && isVideoFile(hoveredFile) ? hoveredFile : selectedFile;
-      if (previewTarget !== undefined && isVideoFile(previewTarget)) {
+      // hover 优先：鼠标/键盘焦点所在的视频/图片；无 hover 时回退选中（兼容无鼠标场景）。
+      const previewTarget =
+        hoveredFile !== undefined && isPreviewableFile(hoveredFile) ? hoveredFile : selectedFile;
+      if (previewTarget !== undefined && isPreviewableFile(previewTarget)) {
         e.preventDefault();
         dispatch({ type: "explorer/preview", file: previewTarget });
       }
