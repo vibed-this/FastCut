@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import type { AddCollectionInput, Collection as IpcCollection } from "../shared/contract.js";
-import { downloadVideo, downloadXhsDirect, isDownloading } from "./downloader.js";
+import { downloadImage, downloadVideo, downloadXhsDirect, isDownloading } from "./downloader.js";
 import { fsList, fsMkdir, fsMove, fsRemove, fsRename } from "./localfs.js";
 import { warmLocalVideoThumbnails } from "./local-thumb.js";
 import { XhsClient } from "./xhs-client.js";
@@ -314,6 +314,37 @@ function registerIpcHandlers(userDataDir: string): void {
           fileId: args.fileId,
           fileName: args.fileName,
           template: args.template,
+          subDir: args.subDir,
+          userDataDir,
+          emit: (event, payload) => {
+            win.webContents.send(event, payload);
+          },
+        });
+      } catch (e) {
+        throw new Error(errMsg(e));
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "download_image",
+    async (
+      _e,
+      args: {
+        imageUrl: string;
+        shareId: string;
+        fileId: string;
+        fileName: string;
+        subDir: string;
+      },
+    ) => {
+      try {
+        const win = getWin();
+        return await downloadImage({
+          imageUrl: args.imageUrl,
+          shareId: args.shareId,
+          fileId: args.fileId,
+          fileName: args.fileName,
           subDir: args.subDir,
           userDataDir,
           emit: (event, payload) => {

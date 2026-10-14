@@ -24,6 +24,7 @@ import {
   VideoCameraOutlined,
 } from "@ant-design/icons";
 import {
+  downloadImage,
   downloadVideo,
   fsList,
   fsMkdir,
@@ -44,7 +45,7 @@ import type { FileStatus, FsEntry, ShareItem } from "../api";
 import { detectShareLink } from "../../../electron/shared/share-link";
 import { useStore, type ExplorerFile, type ExplorerProgress } from "../store";
 import VideoPane, { autoDownloadSilentIds, pickUsableTemplate } from "./VideoPane";
-import ImagePane from "./ImagePane";
+import ImagePane, { imageAutoSaveFiredKeys, resolveImageHdUrl } from "./ImagePane";
 import { toLocalMediaUrl } from "../../../electron/shared/media-url";
 import { formatBytes, progressPercent, selectXhsPending } from "./pendingTiles";
 
@@ -550,8 +551,10 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
     });
     void onDownloadDone((d) => {
       dispatch({ type: "explorer/progressClear", file_id: d.file_id });
-      const silent = autoDownloadSilentIds.has(d.file_id);
+      const silent =
+        autoDownloadSilentIds.has(d.file_id) || imageAutoSaveFiredKeys.has(d.file_id);
       autoDownloadSilentIds.delete(d.file_id);
+      imageAutoSaveFiredKeys.delete(d.file_id);
       if (!d.ok) {
         void message.error(d.error ?? "下载失败");
       } else if (!silent) {
@@ -633,13 +636,14 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
 
   /**
    * 磁贴直下：不开播放器直接下载（hover 下载按钮用）。
-   * 与 VideoPane.handleSave 同策略（最高档 + stack 子目录），但走手动路径：
+   * 视频与 VideoPane.handleSave 同策略（最高档 + stack 子目录）；
+   * 图片直接下载服务端高清原图（`url` 字段）。走手动路径：
    * 有开始/完成 toast，不进自动静默集合。取链空窗期用 tilePending 转圈。
    * 仅 alipan 模式可用。
    */
   async function handleTileDownload(item: ExplorerFile): Promise<void> {
     if (currentExplorer.kind !== "alipan") return;
-    if (item.type === "folder" || !isVideoFile(item)) {
+    if (item.type === "folder" || (!isVideoFile(item) && !isImageFile(item))) {
       return;
     }
     if (state.materialDir === "" || state.materialDir === null) {
@@ -666,24 +670,39 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
         void message.info("该文件已保存");
         return;
       }
-      const list = await videoPreview(currentExplorer.collection_id, item.drive_id, item.file_id);
-      const picked = pickUsableTemplate(list);
-      if (picked === undefined || picked.preview_url === undefined || picked.preview_url === "") {
-        throw new Error("没有可用的预览档");
-      }
       // sub_dir 为 stack 路径名 join（根目录除外），与 VideoPane 保存路径一致。
       const dirs = currentExplorer.stack
         .slice(1)
         .map((s) => s.name)
         .filter((n) => n !== "");
-      await downloadVideo(
-        picked.preview_url,
-        currentExplorer.collection_id,
-        item.file_id,
-        item.name,
-        picked.template_id,
-        dirs.join("/"),
-      );
+      const subDir = dirs.join("/");
+      if (isImageFile(item)) {
+        const { primary } = resolveImageHdUrl(item);
+        if (primary === "") {
+          throw new Error("没有可用的图片地址");
+        }
+        await downloadImage(
+          primary,
+          currentExplorer.collection_id,
+          item.file_id,
+          item.name,
+          subDir,
+        );
+      } else {
+        const list = await videoPreview(currentExplorer.collection_id, item.drive_id, item.file_id);
+        const picked = pickUsableTemplate(list);
+        if (picked === undefined || picked.preview_url === undefined || picked.preview_url === "") {
+          throw new Error("没有可用的预览档");
+        }
+        await downloadVideo(
+          picked.preview_url,
+          currentExplorer.collection_id,
+          item.file_id,
+          item.name,
+          picked.template_id,
+          subDir,
+        );
+      }
       void message.success("已开始下载");
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
@@ -937,7 +956,7 @@ export default function FolderView(props: FolderViewProps): React.JSX.Element {
       >
         <CheckCircleFilled style={{ fontSize: 20, color: "#52c41a" }} />
       </span>
-    ) : !isFolder && isVideo && hovered ? (
+    ) : !isFolder && (isVideo || isImage) && hovered ? (
       <button
         data-testid="tile-download"
         title="下载到素材库"

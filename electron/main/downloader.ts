@@ -17,6 +17,8 @@
  * - download_video 异步 fire-and-forget：空 m3u8 报"m3u8 链接为空"；同一
  *   `share_id:file_id` 重入返回 "downloading"；正常返回 "started"；完成发 done 事件。
  * - 进度事件每完成一片发一次 `{file_id, done, total}`。
+ * - download_image 图片直链版：单文件流式 GET（content-length 进度，无需 ffmpeg），
+ *   落盘保留原后缀，记账 template 为 "original"，与视频共用 inFlight 与事件名。
  * - ffmpeg 路径策略：优先 `ffmpeg-static` 自带二进制，其次系统 PATH 的 `ffmpeg`，
  *   都找不到才报"未检测到 ffmpeg，请先安装 ffmpeg 后再下载"。自检逻辑保留。
  */
@@ -400,8 +402,16 @@ async function readTargetDir(userDataDir: string): Promise<string> {
   return dirRaw;
 }
 
+/** 记账所需最小形状（视频/图片下载入参共享）。 */
+interface LedgerCapable {
+  userDataDir: string;
+  shareId: string;
+  fileId: string;
+  recordLedger?: DownloadVideoOptions["recordLedger"];
+}
+
 async function recordLedgerEntry(
-  opts: DownloadVideoOptions,
+  opts: LedgerCapable,
   entry: LedgerEntryInput,
 ): Promise<void> {
   const fn = opts.recordLedger ?? recordLedger;
@@ -513,6 +523,211 @@ export async function downloadVideo(opts: DownloadVideoOptions): Promise<string>
     throw e;
   }
   void run_pipeline(opts).then(
+    (pathStr) => {
+      const payload: DownloadDonePayload = {
+        file_id: opts.fileId,
+        ok: true,
+        path: pathStr,
+      };
+      opts.emit("download-done", payload);
+    },
+    (e: unknown) => {
+      const payload: DownloadDonePayload = {
+        file_id: opts.fileId,
+        ok: false,
+        error: errText(e),
+      };
+      opts.emit("download-done", payload);
+    },
+  ).finally(() => {
+    inFlight.delete(key);
+  });
+  return "started";
+}
+
+// ---------------------------------------------------------------------------
+// 图片直链下载（alipan 图片原图：单文件流式 GET，无需 ffmpeg）
+// ---------------------------------------------------------------------------
+
+/** 图片下载单次流超时（原图数 MB，相对分片宽松）。 */
+const IMAGE_FETCH_TIMEOUT_MS = 120_000;
+
+/**
+ * `unique_image_path`：`unique_mp4_path` 的图片版，保留原后缀
+ * （`.jpg/.png/.webp` 等；无/非法后缀则无后缀落盘）。
+ * stem 为空→`image`，已存在→` (n)` 后缀。
+ */
+export function unique_image_path(dir: string, fileName: string): string {
+  const parsed = path.parse(fileName);
+  const stem = parsed.name.trim().replace(/[/\\]/g, "_");
+  const base = stem === "" ? "image" : stem;
+  const ext = /^\.[A-Za-z0-9]{1,10}$/.test(parsed.ext) ? parsed.ext : "";
+  let candidate = path.join(dir, `${base}${ext}`);
+  let n = 0;
+  while (existsSync(candidate)) {
+    n += 1;
+    candidate = path.join(dir, `${base} (${n})${ext}`);
+  }
+  return candidate;
+}
+
+/**
+ * `downloadImage` 入参与 `DownloadVideoOptions` 同接线形状
+ * （`imageUrl` 为 alipan 图片原图直链，`template` 记账固定 `"original"`）。
+ */
+export interface DownloadImageOptions {
+  imageUrl: string;
+  shareId: string;
+  fileId: string;
+  fileName: string;
+  subDir: string;
+  userDataDir: string;
+  emit: (event: "download-progress" | "download-done", payload: unknown) => void;
+  recordLedger?: DownloadVideoOptions["recordLedger"];
+}
+
+/**
+ * 流式拉取单文件：边读边发 `{file_id, done, total}` 进度
+ * （total 取 `content-length`，缺失为 0，磁贴仅转圈）。
+ * 错误分类与 `fetchOnce` 一致（超时/网络错/4xx-expired/5xx）。
+ */
+async function fetch_stream(
+  url: string,
+  what: string,
+  fileId: string,
+  emit: DownloadImageOptions["emit"],
+): Promise<Buffer> {
+  let last: FetchFailed = new FetchFailed(false, "");
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(500 * (attempt - 1));
+    try {
+      return await fetch_stream_once(url, what, fileId, emit);
+    } catch (e) {
+      if (!(e instanceof FetchFailed)) throw e;
+      last = e;
+    }
+  }
+  throw last;
+}
+
+async function fetch_stream_once(
+  url: string,
+  what: string,
+  fileId: string,
+  emit: DownloadImageOptions["emit"],
+): Promise<Buffer> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), IMAGE_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch(url, { signal: ctrl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    const timeout =
+      (e instanceof DOMException && e.name === "AbortError") ||
+      (e instanceof Error && e.name === "AbortError");
+    throw new FetchFailed(
+      false,
+      `${what}${timeout ? "请求超时" : "网络错误"}：${errText(e)}`,
+    );
+  }
+  if (!resp.ok) {
+    clearTimeout(timer);
+    if (resp.status >= 400 && resp.status < 500) {
+      throw new FetchFailed(true, `${what}请求被拒（HTTP ${resp.status}）`);
+    }
+    throw new FetchFailed(false, `${what}服务端异常（HTTP ${resp.status}）`);
+  }
+  const total = Number(resp.headers.get("content-length") ?? "") || 0;
+  const reader = resp.body?.getReader();
+  // 无流式 body（如测试桩）时整体读取。
+  if (reader === undefined) {
+    try {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      clearTimeout(timer);
+      return buf;
+    } catch (e) {
+      clearTimeout(timer);
+      throw new FetchFailed(false, `${what}读取失败：${errText(e)}`);
+    }
+  }
+  const chunks: Buffer[] = [];
+  let done = 0;
+  try {
+    for (;;) {
+      const { done: finished, value } = await reader.read();
+      if (finished) break;
+      const buf = Buffer.from(value);
+      chunks.push(buf);
+      done += buf.length;
+      const payload: DownloadProgressPayload = { file_id: fileId, done, total };
+      emit("download-progress", payload);
+    }
+  } catch (e) {
+    throw new FetchFailed(false, `${what}读取失败：${errText(e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  const blob = Buffer.concat(chunks);
+  if (blob.length === 0) {
+    throw new FetchFailed(false, `${what}内容为空，下载中止`);
+  }
+  return blob;
+}
+
+/** 图片下载主流程：建目录 → 流式拉取 → 落盘 → 记账（template `"original"`）。 */
+async function run_image_pipeline(opts: DownloadImageOptions): Promise<string> {
+  const { imageUrl, fileId, fileName, subDir, userDataDir } = opts;
+
+  const dirRaw = await readTargetDir(userDataDir);
+  const dir = resolve_target_dir(dirRaw, subDir);
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (e) {
+    throw new Error(`目标文件夹创建失败：${errText(e)}`);
+  }
+  const safeName = sanitizeSegment(fileName);
+  const outPath = unique_image_path(dir, safeName);
+
+  let bytes: Buffer;
+  try {
+    bytes = await fetch_stream(imageUrl, "图片", fileId, opts.emit);
+  } catch (e) {
+    if (e instanceof FetchFailed && e.expired) {
+      throw new Error(`${e.detail} EXPIRED：签名可能已过期，请重取链接后重试`);
+    }
+    throw new Error(e instanceof FetchFailed ? e.detail : errText(e));
+  }
+  try {
+    await writeFile(outPath, bytes);
+  } catch (e) {
+    throw new Error(`图片落盘失败：${errText(e)}`);
+  }
+
+  const savedAt = Math.floor(Date.now() / 1000);
+  await recordLedgerEntry(opts, {
+    path: outPath,
+    saved_at: savedAt,
+    template: "original",
+  });
+  return outPath;
+}
+
+/**
+ * 对应 `download_video` 的图片版：异步 fire-and-forget。
+ * 空链接报"图片链接为空"；同一 `share_id:file_id` 重入返回 `"downloading"`；
+ * 正常返回 `"started"`；结果走 `emit("download-done", {file_id, ok, path?, error?})`。
+ * 与视频共用 `inFlight`（同文件不可能是两种类型）与事件名，
+ * 前端进度/完成订阅、磁贴状态机、拖拽均无需改动。
+ */
+export async function downloadImage(opts: DownloadImageOptions): Promise<string> {
+  if (opts.imageUrl.trim() === "") {
+    throw new Error("图片链接为空");
+  }
+  const key = ledgerKey(opts.shareId, opts.fileId);
+  if (inFlight.has(key)) return "downloading";
+  inFlight.add(key);
+  void run_image_pipeline(opts).then(
     (pathStr) => {
       const payload: DownloadDonePayload = {
         file_id: opts.fileId,

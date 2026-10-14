@@ -10,6 +10,7 @@ import {
   parse_segments,
   resolve_segment,
   resolve_target_dir,
+  unique_image_path,
   unique_mp4_path,
 } from "./downloader.js";
 
@@ -72,5 +73,16 @@ describe("unique_mp4_path", () => {
     writeFileSync(path.join(dir, "video (1).mp4"), "x");
     expect(unique_mp4_path(dir, "video.mp4")).toBe(path.join(dir, "video (2).mp4"));
     expect(unique_mp4_path(dir, "")).toBe(path.join(dir, "video (2).mp4"));
+  });
+});
+
+describe("unique_image_path", () => {
+  it("保留原后缀、已存在加 (n) 后缀、空 stem 回退 image", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "img-"));
+    writeFileSync(path.join(dir, "a.jpg"), "x");
+    expect(unique_image_path(dir, "b.png")).toBe(path.join(dir, "b.png"));
+    expect(unique_image_path(dir, "a.jpg")).toBe(path.join(dir, "a (1).jpg"));
+    expect(unique_image_path(dir, "")).toBe(path.join(dir, "image"));
+    expect(unique_image_path(dir, ".jpg")).toBe(path.join(dir, ".jpg"));
   });
 });

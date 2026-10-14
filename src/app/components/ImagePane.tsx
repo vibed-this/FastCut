@@ -1,9 +1,11 @@
 /** 图片预览面板：点击完整查看 / 空格 Quick Look 预览（复用 VideoPlayerModal 悬浮窗）。 */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, App as AntdApp, Spin, Typography } from "antd";
-import { getLocalThumbnail } from "../api";
+import { Alert, App as AntdApp, Button, Spin, Typography } from "antd";
+import { DownloadOutlined } from "@ant-design/icons";
+import { downloadImage, getLocalThumbnail, getStatusBatch } from "../api";
 import { useStore } from "../store";
 import VideoPlayerModal from "./VideoPlayerModal";
+import { autoDownloadSilentIds } from "./VideoPane";
 import { toLocalMediaUrl } from "../../../electron/shared/media-url";
 
 /** 播放器模式：open=点击完整查看，preview=空格 Quick Look 预览（与 VideoPane 对齐）。 */
@@ -37,6 +39,33 @@ export function upgradeThumbnailUrl(url: string): string {
 }
 
 /**
+ * 图片已自动查看保存的 fileKey（跨 open/preview 实例共享：预览触发过则完整模式不再重复触发，
+ * 反之亦然；手动点保存不受此限制。与 VideoPane 的视频集合互不干扰）。
+ */
+export const imageAutoSaveFiredKeys = new Set<string>();
+
+/**
+ * 解析图片远端地址（纯函数，供面板与磁贴直下共用）：
+ * 服务端 `url` 字段（image_url_process 高清原图）优先，否则提清晰度后的缩略图；
+ * fallback 恒为原缩略图（高清档签名失效时回退；与 primary 相同时调用方须防循环）。
+ *
+ * @param file - 含 url/thumbnail 的条目
+ * @returns 高清首选 + 回退地址（无可用时 primary 为空串）
+ */
+export function resolveImageHdUrl(file: { url?: string | null; thumbnail?: string }): {
+  primary: string;
+  fallback: string;
+} {
+  const raw = file.url;
+  const remoteHigh = typeof raw === "string" && raw !== "" ? raw : undefined;
+  const thumb = file.thumbnail ?? "";
+  return {
+    primary: remoteHigh ?? (thumb !== "" ? upgradeThumbnailUrl(thumb) : ""),
+    fallback: thumb,
+  };
+}
+
+/**
  * 图片面板（双模式，与 VideoPane 共用 Modal 外壳与空格语义）。
  *
  * - xiaohongshu 本地：absPath 经 media:// 直显原图；
@@ -58,14 +87,24 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
 
   const file = mode === "open" ? explorer?.opened_file : explorer?.preview_file;
   const fileKey = file === undefined ? "" : `${file.drive_id}/${file.file_id}`;
+  const isXhs = explorer?.kind === "xiaohongshu";
 
-  const [src, setSrc] = useState("");
-  const [fallbackSrc, setFallbackSrc] = useState("");
+  /** 已保存原图地址（优先展示）；为空则展示远端 primary。 */
+  const [localUrl, setLocalUrl] = useState("");
+  const [remotePrimary, setRemotePrimary] = useState("");
+  const [remoteFallback, setRemoteFallback] = useState("");
+  const src = localUrl !== "" ? localUrl : remotePrimary;
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [failedMsg, setFailedMsg] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   /** 图片宽高比（w/h）：onLoad 回填，Modal 按比例定窗消黑边（与视频同理）。 */
   const [imageRatio, setImageRatio] = useState<number | null>(null);
+  /** 本地原图加载失败后是否已回退过远端（防循环）。 */
+  const localFallbackDoneRef = useRef(false);
+  /** handleSave 最新闭包（img onLoad 经此调用，避免过期 state）。 */
+  const handleSaveRef = useRef<(auto: boolean) => Promise<void>>(async () => undefined);
 
   // ---- 缩放 / 平移（ref 为真值源，state 只驱动渲染；避免 updater 内副作用） ----
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -90,8 +129,10 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
   }, [applyView]);
 
   /**
-   * 解析图片地址：本地直拼 media://；远端先查本地缩略图缓存，
-   * 未命中用服务端高清字段/提清晰度后的缩略图。
+   * 解析图片地址（与 VideoPane.fetchPreview 同策略）：
+   * xhs 本地直拼 media://；alipan 已保存播本地落盘原图，否则远端
+   * （本地缩略图缓存秒显先行，未命中走服务端高清字段/提清晰度缩略图）。
+   * 本地原图被挪走/删除时由 img onError 回退远端（仅一次，防循环）。
    */
   useEffect(() => {
     if (explorer === undefined || explorer === null || file === undefined) {
@@ -99,12 +140,14 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
     }
     let cancelled = false;
     const cur = file;
-    setSrc("");
-    setFallbackSrc("");
+    setLocalUrl("");
+    setRemotePrimary("");
+    setRemoteFallback("");
     setFailed(false);
     setFailedMsg("");
     setLoading(true);
     setImageRatio(null);
+    localFallbackDoneRef.current = false;
     resetView();
     void (async () => {
       try {
@@ -114,32 +157,41 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
             throw new Error("本地文件路径缺失");
           }
           if (!cancelled) {
-            setSrc(toLocalMediaUrl(abs));
+            setSaved(true);
+            setLocalUrl(toLocalMediaUrl(abs));
             // loading 由 img onLoad 关闭（解码完成才撤 spinner）。
           }
           return;
         }
-        // alipan：本地缩略图缓存优先（秒显），未命中走远端。
+        // alipan：已保存优先本地原图（与视频一致，可拖拽、无签名过期）。
+        const statuses = await getStatusBatch(explorer.collection_id, [cur.file_id]);
+        if (cancelled) return;
+        const savedEntry = statuses.find((s) => s.file_id === cur.file_id && s.state === "saved");
+        if (savedEntry?.path !== undefined && savedEntry.path !== "") {
+          setSaved(true);
+          setLocalUrl(toLocalMediaUrl(savedEntry.path));
+          setLoading(false);
+          return;
+        }
+        setSaved(false);
+        const { primary, fallback } = resolveImageHdUrl(cur);
+        // 本地缩略图缓存优先秒显（media://），远端高清作加载失败回退。
+        let first = primary;
         try {
           const cached = await getLocalThumbnail(explorer.collection_id, cur.file_id);
           if (cancelled) return;
           if (cached !== null && cached !== "") {
-            setSrc(cached);
-            return;
+            first = cached;
           }
         } catch {
           // 缓存查询失败不阻断，回退远端。
         }
         if (cancelled) return;
-        const raw = (cur as unknown as { url?: unknown }).url;
-        const remoteHigh = typeof raw === "string" && raw !== "" ? raw : undefined;
-        const thumb = cur.thumbnail ?? "";
-        const primary = remoteHigh ?? (thumb !== "" ? upgradeThumbnailUrl(thumb) : "");
-        if (primary === "") {
+        if (first === "") {
           throw new Error("没有可用的图片地址");
         }
-        setFallbackSrc(remoteHigh !== undefined ? (thumb !== "" ? thumb : "") : thumb);
-        setSrc(primary);
+        setRemoteFallback(first !== primary ? primary : fallback);
+        setRemotePrimary(first);
       } catch (e) {
         if (!cancelled) {
           setFailed(true);
@@ -216,12 +268,62 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
     return <Typography.Text type="secondary">请选择图片文件预览</Typography.Text>;
   }
 
+  /** 保存当前图片原图（auto=true 为查看即存自动触发：不展示开始/完成/已存 toast，失败仍提示）。xhs 本地文件无需保存。 */
+  const curExplorer = explorer;
+  const curFile = file;
+  async function handleSave(auto = false): Promise<void> {
+    if (curExplorer === undefined || curExplorer === null || curFile === undefined) {
+      return;
+    }
+    if (curExplorer.kind === "xiaohongshu") {
+      if (!auto) void message.info("本地文件无需保存");
+      return;
+    }
+    if (state.materialDir === "") {
+      void message.warning("请先在左侧边栏配置素材文件夹");
+      return;
+    }
+    setSaving(true);
+    try {
+      const statuses = await getStatusBatch(curExplorer.collection_id, [curFile.file_id]);
+      if (statuses.some((s) => s.file_id === curFile.file_id && s.state === "saved")) {
+        setSaved(true);
+        if (!auto) {
+          void message.info("该文件已保存");
+        }
+        return;
+      }
+      const { primary } = resolveImageHdUrl(curFile);
+      if (primary === "") {
+        void message.warning("图片地址尚未就绪，请稍后重试");
+        return;
+      }
+      // sub_dir 为 stack 路径名 join（根目录除外），与 VideoPane 保存路径一致。
+      const dirs = curExplorer.stack
+        .slice(1)
+        .map((s) => s.name)
+        .filter((n) => n !== "");
+      autoDownloadSilentIds.add(curFile.file_id);
+      await downloadImage(primary, curExplorer.collection_id, curFile.file_id, curFile.name, dirs.join("/"));
+      if (!auto) {
+        void message.success("已开始下载");
+      }
+    } catch (e) {
+      autoDownloadSilentIds.delete(curFile.file_id);
+      void message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  handleSaveRef.current = handleSave;
+
   /** 关闭 viewer：open 清 opened_file，preview 清 preview_file；选中保留（与 VideoPane 一致）。 */
   const closeViewer = useCallback((): void => {
     dispatch({ type: mode === "open" ? "explorer/openFile" : "explorer/preview", file: undefined });
     dispatch({ type: "explorer/video", video: undefined });
-    setSrc("");
-    setFallbackSrc("");
+    setLocalUrl("");
+    setRemotePrimary("");
+    setRemoteFallback("");
     setFailed(false);
     setFailedMsg("");
     setImageRatio(null);
@@ -229,6 +331,7 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
   }, [dispatch, mode, resetView]);
 
   const isOpen = mode === "open";
+  const noMaterial = state.materialDir === "";
   const offFit = Math.abs(scale - IMAGE_FIT_SCALE) > 1e-6;
   const moved = Math.abs(offset.x) > 0.5 || Math.abs(offset.y) > 0.5;
 
@@ -241,6 +344,29 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
       chrome={isOpen}
       dimmed={isOpen}
       transparent
+      actions={
+        isOpen && !isXhs ? (
+          <Button
+            data-testid="save-image"
+            type="primary"
+            size="small"
+            icon={<DownloadOutlined />}
+            loading={saving}
+            disabled={saved || noMaterial}
+            title={noMaterial ? "请先在左侧边栏配置素材文件夹" : saved ? "已保存" : "保存当前图片"}
+            onClick={() => {
+              void handleSave();
+            }}
+            style={
+              saved || noMaterial
+                ? { background: "#2a2a2a", borderColor: "#434343", color: "rgba(255, 255, 255, 0.5)" }
+                : undefined
+            }
+          >
+            {saved ? "已保存" : "保存"}
+          </Button>
+        ) : undefined
+      }
     >
       <div
         ref={containerRef}
@@ -285,13 +411,24 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
                 setImageRatio(img.naturalWidth / img.naturalHeight);
               }
               setLoading(false);
+              // 查看即存（仅 alipan：open 与 preview 均触发：成功显示一次即自动保存原图，
+              // 等价于自动点下载按钮；与视频播即存对齐，跨实例重复由 fired 集合拦）。
+              if (!isXhs && !imageAutoSaveFiredKeys.has(fileKey)) {
+                imageAutoSaveFiredKeys.add(fileKey);
+                void handleSaveRef.current(true);
+              }
             }}
             onError={() => {
+              // 本地原图被挪走/删除：回退远端一次（仅一次，防循环）；xhs 无远端直接报错。
+              if (localUrl !== "" && !localFallbackDoneRef.current && !isXhs) {
+                localFallbackDoneRef.current = true;
+                setLocalUrl("");
+                return;
+              }
               // 高清档签名失效时回退原缩略图；两者都失败才报错。
-              if (fallbackSrc !== "" && fallbackSrc !== src) {
-                const fb = fallbackSrc;
-                setFallbackSrc("");
-                setSrc(fb);
+              if (remoteFallback !== "" && remoteFallback !== src) {
+                setRemotePrimary(remoteFallback);
+                setRemoteFallback("");
                 return;
               }
               setFailed(true);

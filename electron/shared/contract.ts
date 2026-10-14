@@ -64,6 +64,8 @@ export interface ShareItem {
   category?: string;
   file_extension?: string;
   thumbnail?: string;
+  /** 图片原图地址（`image_url_process` 档，仅图片条目有；签名在 query）。 */
+  url?: string;
 }
 
 /** list_share 返回：分页条目 + 下一页 marker。 */
@@ -128,6 +130,15 @@ export interface DownloadVideoOpts {
   file_name: string;
   m3u8_url: string;
   template: string;
+  sub_dir: string;
+}
+
+/** download_image 的对象式入参（与各位置参数一一对应；图片直链下载，无转码档）。 */
+export interface DownloadImageOpts {
+  share_id: string;
+  file_id: string;
+  file_name: string;
+  image_url: string;
   sub_dir: string;
 }
 
@@ -199,6 +210,7 @@ export type IpcChannel =
   | "pick_preview_url"
   | "get_share_meta"
   | "download_video"
+  | "download_image"
   | "thumbnail_warm"
   | "thumbnail_local"
   | "thumbnail_local_warm"
@@ -253,6 +265,13 @@ export interface IpcParams {
     template: string;
     subDir: string;
   };
+  download_image: {
+    imageUrl: string;
+    shareId: string;
+    fileId: string;
+    fileName: string;
+    subDir: string;
+  };
   /** 缩略图预取：缺失项后台下载，返回命中的 fileId → 本地媒体 URL。 */
   thumbnail_warm: { shareId: string; files: { fileId: string; url: string }[] };
   /** 查单个缩略图本地缓存：命中返回媒体 URL，否则 null。 */
@@ -292,6 +311,7 @@ export interface IpcResult {
   pick_preview_url: PickPreviewResult;
   get_share_meta: ShareMeta;
   download_video: string;
+  download_image: string;
   thumbnail_warm: { cached: Record<string, string> };
   thumbnail_local: { url: string } | null;
   thumbnail_local_warm: { cached: Record<string, string> };

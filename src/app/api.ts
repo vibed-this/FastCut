@@ -2,6 +2,7 @@ import type {
   AppConfig,
   Definition,
   DownloadDonePayload,
+  DownloadImageOpts,
   DownloadProgressPayload,
   DownloadVideoOpts,
   FileStatus,
@@ -22,6 +23,7 @@ export type {
   AppConfig,
   Definition,
   DownloadDonePayload,
+  DownloadImageOpts,
   DownloadProgressPayload,
   DownloadVideoOpts,
   FileState,
@@ -415,6 +417,40 @@ export function downloadVideo(
     fileId: file_id ?? "",
     fileName: file_name ?? "",
     template: template ?? "",
+    subDir: sub_dir ?? "",
+  });
+}
+
+export function downloadImage(opts: DownloadImageOpts): Promise<string>;
+export function downloadImage(
+  image_url: string,
+  share_id: string,
+  file_id: string,
+  file_name: string,
+  sub_dir: string,
+): Promise<string>;
+export function downloadImage(
+  image_url_or_opts: string | DownloadImageOpts,
+  share_id?: string,
+  file_id?: string,
+  file_name?: string,
+  sub_dir?: string,
+): Promise<string> {
+  if (typeof image_url_or_opts === "object") {
+    const o = image_url_or_opts;
+    return invoke("download_image", {
+      imageUrl: o.image_url,
+      shareId: o.share_id,
+      fileId: o.file_id,
+      fileName: o.file_name,
+      subDir: o.sub_dir,
+    });
+  }
+  return invoke("download_image", {
+    imageUrl: image_url_or_opts,
+    shareId: share_id ?? "",
+    fileId: file_id ?? "",
+    fileName: file_name ?? "",
     subDir: sub_dir ?? "",
   });
 }
