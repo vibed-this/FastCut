@@ -1,5 +1,5 @@
 /** 图片预览面板：点击完整查看 / 空格 Quick Look 预览（复用 VideoPlayerModal 悬浮窗）。 */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, App as AntdApp, Spin, Typography } from "antd";
 import { getLocalThumbnail } from "../api";
 import { useStore } from "../store";
@@ -14,6 +14,12 @@ export interface ImagePaneProps {
   /** 模式。 */
   mode: ImagePaneMode;
 }
+
+/** 缩放上下限（1=贴合窗口；允许缩小到 0.1，最大 8 倍）。 */
+export const IMAGE_MIN_SCALE = 0.1;
+export const IMAGE_MAX_SCALE = 8;
+/** 贴合窗口的基准缩放。 */
+export const IMAGE_FIT_SCALE = 1;
 
 /**
  * 缩略图提清晰度：服务端快照为 w_256 小图（`image/resize,w_256/...`），
@@ -37,6 +43,9 @@ export function upgradeThumbnailUrl(url: string): string {
  * - alipan 远端：本地缩略图缓存命中即秒显（media://），否则远端 thumbnail
  *   先尝试 w_1920 高清档，失败回退原缩略图；服务端额外返回的 `url`
  *   字段（image_url_process 高清图）优先使用。
+ * - 窗口按图片原始比例贴合（经 videoRatio 透传，与视频一致，无黑边）；
+ * - 图片整体式交互（不受框体裁切）：滚轮以光标为锚点整体缩放（1–8 倍），
+ *   拖拽整体移动图片（任意缩放下均可），双击/点百分比复位。
  *
  * @param props - 组件属性
  * @returns 预览元素
@@ -55,6 +64,30 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [failedMsg, setFailedMsg] = useState("");
+  /** 图片宽高比（w/h）：onLoad 回填，Modal 按比例定窗消黑边（与视频同理）。 */
+  const [imageRatio, setImageRatio] = useState<number | null>(null);
+
+  // ---- 缩放 / 平移（ref 为真值源，state 只驱动渲染；避免 updater 内副作用） ----
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const scaleRef = useRef(IMAGE_MIN_SCALE);
+  const offsetRef = useRef({ x: 0, y: 0 });
+  const [scale, setScale] = useState(IMAGE_MIN_SCALE);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+
+  /** 应用缩放+偏移（同步 ref 与 state）。 */
+  const applyView = useCallback((s: number, o: { x: number; y: number }): void => {
+    scaleRef.current = s;
+    offsetRef.current = o;
+    setScale(s);
+    setOffset(o);
+  }, []);
+
+  /** 复位到贴合窗口。 */
+  const resetView = useCallback((): void => {
+    applyView(IMAGE_FIT_SCALE, { x: 0, y: 0 });
+  }, [applyView]);
 
   /**
    * 解析图片地址：本地直拼 media://；远端先查本地缩略图缓存，
@@ -71,6 +104,8 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
     setFailed(false);
     setFailedMsg("");
     setLoading(true);
+    setImageRatio(null);
+    resetView();
     void (async () => {
       try {
         if (explorer.kind === "xiaohongshu") {
@@ -80,7 +115,7 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
           }
           if (!cancelled) {
             setSrc(toLocalMediaUrl(abs));
-            setLoading(false);
+            // loading 由 img onLoad 关闭（解码完成才撤 spinner）。
           }
           return;
         }
@@ -90,7 +125,6 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
           if (cancelled) return;
           if (cached !== null && cached !== "") {
             setSrc(cached);
-            setLoading(false);
             return;
           }
         } catch {
@@ -106,7 +140,6 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
         }
         setFallbackSrc(remoteHigh !== undefined ? (thumb !== "" ? thumb : "") : thumb);
         setSrc(primary);
-        setLoading(false);
       } catch (e) {
         if (!cancelled) {
           setFailed(true);
@@ -122,6 +155,63 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
 
+  // 滚轮整体缩放（原生非 passive 监听，以光标为锚点；图片不被框体裁切，
+  // 事件经 DOM 冒泡到达容器，图片拖离原位后悬停其上仍可缩放）。
+  useEffect(() => {
+    const el = containerRef.current;
+    if (el === null) {
+      return;
+    }
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault();
+      const prev = scaleRef.current;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const next = Math.min(IMAGE_MAX_SCALE, Math.max(IMAGE_MIN_SCALE, prev * factor));
+      if (next === prev) {
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left - rect.width / 2;
+      const cy = e.clientY - rect.top - rect.height / 2;
+      const o = offsetRef.current;
+      const k = next / prev;
+      // 光标下的图片像素缩放前后保持在光标处（含缩小到贴合以下）。
+      const target = { x: cx - (cx - o.x) * k, y: cy - (cy - o.y) * k };
+      applyView(next, target);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+    };
+  }, [applyView, src]);
+
+  // 拖拽整体移动：任意缩放下均可按住拖走图片（图片不受框体裁切）；
+  // window 上跟踪，松开结束。移丢了用双击/复位按钮找回。
+  useEffect(() => {
+    if (!dragging) {
+      return;
+    }
+    const onMove = (e: MouseEvent): void => {
+      const st = dragRef.current;
+      if (st === null) {
+        return;
+      }
+      const target = { x: st.ox + (e.clientX - st.sx), y: st.oy + (e.clientY - st.sy) };
+      offsetRef.current = target;
+      setOffset(target);
+    };
+    const onUp = (): void => {
+      dragRef.current = null;
+      setDragging(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp, { once: true });
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging]);
+
   if (explorer === null || explorer === undefined || file === undefined) {
     return <Typography.Text type="secondary">请选择图片文件预览</Typography.Text>;
   }
@@ -134,30 +224,68 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
     setFallbackSrc("");
     setFailed(false);
     setFailedMsg("");
-  }, [dispatch, mode]);
+    setImageRatio(null);
+    resetView();
+  }, [dispatch, mode, resetView]);
 
   const isOpen = mode === "open";
+  const offFit = Math.abs(scale - IMAGE_FIT_SCALE) > 1e-6;
+  const moved = Math.abs(offset.x) > 0.5 || Math.abs(offset.y) > 0.5;
 
   return (
-    <VideoPlayerModal open title={file.name} onClose={closeViewer} chrome={isOpen} dimmed={isOpen}>
+    <VideoPlayerModal
+      open
+      title={file.name}
+      onClose={closeViewer}
+      videoRatio={imageRatio}
+      chrome={isOpen}
+      dimmed={isOpen}
+      transparent
+    >
       <div
+        ref={containerRef}
         style={{
           flex: 1,
           minHeight: 0,
           position: "relative",
-          background: "#000",
+          background: "transparent",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          overflow: "hidden",
+          overflow: "visible",
+        }}
+        onMouseDown={(e) => {
+          // 图片整体拖拽：任意缩放下左键按下即记录起点。
+          if (e.button !== 0) {
+            return;
+          }
+          e.preventDefault();
+          dragRef.current = {
+            sx: e.clientX,
+            sy: e.clientY,
+            ox: offsetRef.current.x,
+            oy: offsetRef.current.y,
+          };
+          setDragging(true);
+        }}
+        onDoubleClick={() => {
+          resetView();
         }}
       >
         {src !== "" && !failed ? (
           <img
             data-testid="preview-image"
             src={src}
-            alt={file.name}
+            alt=""
+            draggable={false}
             referrerPolicy="no-referrer"
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                setImageRatio(img.naturalWidth / img.naturalHeight);
+              }
+              setLoading(false);
+            }}
             onError={() => {
               // 高清档签名失效时回退原缩略图；两者都失败才报错。
               if (fallbackSrc !== "" && fallbackSrc !== src) {
@@ -167,10 +295,50 @@ export default function ImagePane(props: ImagePaneProps): React.JSX.Element {
                 return;
               }
               setFailed(true);
+              setLoading(false);
               setFailedMsg("图片加载失败，可能是链接过期或文件不存在");
             }}
-            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              display: "block",
+              userSelect: "none",
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              transformOrigin: "center",
+              transition: dragging ? undefined : "transform 0.12s ease-out",
+              cursor: dragging ? "grabbing" : "grab",
+              // 阴影跟图片本体走（drop-shadow 按实际像素投影，缩放/移动时同步；
+              // 不用 box-shadow：contain 留白时它会描出整个元素框）。
+              filter: "drop-shadow(0 18px 50px rgba(0, 0, 0, 0.55))",
+            }}
           />
+        ) : null}
+        {(offFit || moved) && !failed ? (
+          <button
+            data-testid="image-zoom-reset"
+            aria-label={offFit ? `当前缩放 ${Math.round(scale * 100)}%，点击复位` : "图片已移位，点击复位"}
+            onClick={(e) => {
+              e.stopPropagation();
+              resetView();
+            }}
+            style={{
+              position: "absolute",
+              right: 10,
+              bottom: 10,
+              zIndex: 7,
+              border: "1px solid rgba(255,255,255,0.25)",
+              borderRadius: 6,
+              background: "rgba(0,0,0,0.6)",
+              color: "#fff",
+              fontSize: 12,
+              lineHeight: "20px",
+              padding: "2px 8px",
+              cursor: "pointer",
+            }}
+          >
+            {offFit ? `${Math.round(scale * 100)}% 复位` : "复位"}
+          </button>
         ) : null}
         {loading ? (
           <div

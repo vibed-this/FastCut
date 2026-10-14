@@ -17,6 +17,11 @@ export interface VideoPlayerModalProps {
   chrome?: boolean;
   /** 是否显示半透明遮罩（双击打开的完整播放器为 true，空格预览为 false）。 */
   dimmed?: boolean;
+  /**
+   * 媒体框透明无底、允许溢出（图片整体缩放用：图片放大移出框体时不被裁切，
+   * 框体只保留定位作用；视频保持默认黑底裁切）。
+   */
+  transparent?: boolean;
   /** 关闭回调：ESC、遮罩点击、关闭按钮统一走这里。 */
   onClose: () => void;
   /** 中部视频区：调用方传入已接好播放源的 <video> 元素。 */
@@ -34,7 +39,7 @@ export interface VideoPlayerModalProps {
  * @returns 播放器元素，关闭时返回 null
  */
 export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JSX.Element | null {
-  const { open, title, actions, videoRatio, chrome = true, dimmed = false, onClose, children } = props;
+  const { open, title, actions, videoRatio, chrome = true, dimmed = false, transparent = false, onClose, children } = props;
   const boxRef = useRef<HTMLDivElement | null>(null);
   // 窗口尺寸：视频区按原始比例贴合（无黑边），总高度 = 视频区 + 标题栏；约束在视口内。
   const [boxSize, setBoxSize] = useState<{ width: number; height: number } | null>(null);
@@ -171,12 +176,12 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         style={{
           width: boxSize === null ? "min(1000px, 92vw)" : boxSize.width,
           height: boxSize === null ? "min(660px, 86vh)" : boxSize.height,
-          background: "#000",
+          background: transparent ? "transparent" : "#000",
           borderRadius: 12,
-          overflow: "hidden",
+          overflow: transparent ? "visible" : "hidden",
           display: "flex",
           flexDirection: "column",
-          boxShadow: "0 18px 70px rgba(0, 0, 0, 0.65)",
+          boxShadow: transparent ? "none" : "0 18px 70px rgba(0, 0, 0, 0.65)",
           animation: leaving
             ? "fc-modal-zoom-out 0.16s ease-in forwards"
             : "fc-modal-zoom-in 0.2s cubic-bezier(0.2, 0.9, 0.25, 1.2)",
@@ -193,6 +198,9 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
               padding: "0 12px",
               background: "#141414",
               borderBottom: "1px solid #2a2a2a",
+              // transparent 下框体不再裁切，标题栏自带上圆角。
+              borderTopLeftRadius: transparent ? 12 : 0,
+              borderTopRightRadius: transparent ? 12 : 0,
             }}
           >
             <Typography.Text
@@ -225,12 +233,12 @@ export default function VideoPlayerModal(props: VideoPlayerModalProps): React.JS
         <div
           data-testid="video-player-body"
           style={{
-            background: "#000",
+            background: transparent ? "transparent" : "#000",
             flex: 1,
             minHeight: 0,
             display: "flex",
             flexDirection: "column",
-            overflow: "hidden",
+            overflow: transparent ? "visible" : "hidden",
           }}
         >
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{children}</div>
